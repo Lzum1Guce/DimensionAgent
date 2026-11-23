@@ -1,0 +1,17 @@
+{
+  "name": "dimension-native-plugin-host",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Original isolated compatibility worker for plugin metadata, skills and MCP",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "semver": "7.8.6",
+    "tar": "7.5.23",
+    "yaml": "2.9.1"
+  }
+}
