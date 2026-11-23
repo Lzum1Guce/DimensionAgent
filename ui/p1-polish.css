@@ -1,0 +1,278 @@
+/* P1 体验打磨层：全局提示 / 系统通知条 / 连接状态 / 发送等待态 / 列表“⋯”按钮等
+   只使用 design-polish.css 的语义 token，兼容三套主题。 */
+
+/* ───────── 全局提示（toast） ───────── */
+.dimension-toast-host {
+  position: fixed;
+  left: 50%;
+  bottom: 96px;
+  z-index: 12001;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(460px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.dimension-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  max-width: 100%;
+  padding: 9px 12px 9px 11px;
+  border: 1px solid var(--color-edge);
+  border-radius: 12px;
+  background: var(--color-menu, var(--color-raised));
+  color: var(--color-ink);
+  box-shadow: var(--shadow-xl);
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+  animation: dimensionToastIn 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dimension-toast.is-leaving { animation: dimensionToastOut 0.2s ease forwards; }
+.dimension-toast-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+}
+.dimension-toast.is-success .dimension-toast-icon { background: color-mix(in srgb, var(--color-success) 16%, transparent); color: var(--color-success); }
+.dimension-toast.is-warning .dimension-toast-icon { background: color-mix(in srgb, var(--color-warning) 18%, transparent); color: var(--color-warning); }
+.dimension-toast.is-error { border-color: color-mix(in srgb, var(--color-danger) 35%, var(--color-edge)); }
+.dimension-toast.is-error .dimension-toast-icon { background: color-mix(in srgb, var(--color-danger) 16%, transparent); color: var(--color-danger); }
+.dimension-toast-text { min-width: 0; }
+.dimension-toast-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -1px -3px 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-ink-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.dimension-toast-close:hover { background: var(--color-menu-hover); color: var(--color-ink); }
+.dimension-toast-close:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+@keyframes dimensionToastIn { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes dimensionToastOut { to { opacity: 0; transform: translateY(4px) scale(0.98); } }
+/* 旧的单条提示容器已被统一 toast 取代 */
+#paperHint, #messageActionNotice { display: none !important; }
+
+/* ───────── 系统通知条（不再伪装成角色气泡） ───────── */
+.transcript .bubble.system {
+  align-self: center;
+  max-width: min(86%, 560px);
+  margin: 6px auto;
+  padding: 7px 14px;
+  border: 1px dashed color-mix(in srgb, var(--color-ink) 16%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-panel) 70%, transparent);
+  color: var(--color-ink-secondary);
+  box-shadow: none;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+.transcript .bubble.system .system-source {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--color-accent-text);
+  opacity: 0.85;
+}
+.transcript .bubble.system .md-content,
+.transcript .bubble.system p { margin: 0; }
+
+/* ───────── 私聊连接状态条 ───────── */
+.chat-connection-bar {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  z-index: 8;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 40%, var(--color-edge));
+  border-radius: 999px;
+  background: var(--color-raised);
+  color: var(--color-ink-secondary);
+  box-shadow: var(--shadow-lg);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.chat-connection-bar[hidden] { display: none; }
+.chat-connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  animation: chatConnPulse 1.2s ease-in-out infinite;
+}
+@keyframes chatConnPulse { 50% { opacity: 0.3; } }
+.chat-stage { position: relative; }
+
+/* ───────── 私聊等待回复：发送键转圈 ───────── */
+.send-btn.is-waiting { position: relative; color: transparent !important; }
+.send-btn.is-waiting svg { opacity: 0; }
+.send-btn.is-waiting::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: sendWaitSpin 0.8s linear infinite;
+}
+@keyframes sendWaitSpin { to { transform: rotate(360deg); } }
+
+/* ───────── 列表项“⋯”更多按钮（会话 / 群成员） ───────── */
+.row-more-btn {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-ink-tertiary);
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+:is(.bot-item, .pinned-item, .group-item, .group-member):hover .row-more-btn,
+:is(.bot-item, .pinned-item, .group-item, .group-member):focus-within .row-more-btn,
+.row-more-btn[aria-expanded="true"],
+.row-more-btn:focus-visible { opacity: 1; }
+.row-more-btn:hover { background: var(--color-menu-hover); color: var(--color-ink); }
+.row-more-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+@media (hover: none) { .row-more-btn { opacity: 1; } }
+
+/* ───────── 扩展中枢子面板：返回入口 ───────── */
+.hub-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--color-edge);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.hub-back-btn:hover { background: var(--color-menu-hover); color: var(--color-ink); }
+/* 有些子面板 dialog 是 padding:0，给返回按钮留出与卡片边缘的呼吸距离 */
+dialog > .hub-back-btn, .modal > .hub-back-btn { margin: 14px 0 4px 18px !important; min-height: 0 !important; height: auto !important; padding: 4px 10px 4px 6px !important; border-radius: 999px !important; }
+.hub-back-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+/* ───────── 草稿状态：打字时的“正在暂存”不再闪现挤动工具栏 ───────── */
+.composer-meta .draft-status[data-state="saving"] { display: none; }
+
+/* ───────── 键位秘籍：收窄弹窗，键位与说明紧凑对齐 ───────── */
+.modal.keyboard-help-modal { width: min(560px, calc(100vw - 32px)); max-width: min(560px, calc(100vw - 32px)); }
+.keyboard-help-modal .keyboard-help-list > div { grid-template-columns: minmax(150px, max-content) 1fr; column-gap: 18px; align-items: center; }
+
+/* ───────── 设置：界面动效分段选择 / 跟随系统时标出生效主题 ───────── */
+.cs-motion { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--color-hairline); }
+.cs-motion-label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; color: var(--color-ink); }
+.cs-motion-seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--color-control); }
+.cs-motion-opt {
+  min-width: 64px;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.cs-motion-opt:hover { color: var(--color-ink); }
+.cs-motion-opt.is-active { background: var(--color-raised); color: var(--color-ink); box-shadow: var(--shadow-sm), var(--surface-highlight); font-weight: 600; }
+.cs-motion-opt:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.cs-theme-card { position: relative; }
+.cs-theme-card.is-auto { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent); }
+.cs-theme-card.is-auto::after {
+  content: "自动";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+/* 界面动效「精简」：关掉装饰性循环动画（头像待机漂浮、星轨、欢迎页光晕与星屑、印章呼吸），保留加载与状态提示 */
+html[data-motion="lite"] :is(.dimension-bot.is-idle *, .atelier-wordmark-float, .atelier-wordmark-halo, [class*="mote"], .paper-seal, .paper-seal *) {
+  animation: none !important;
+}
+html[data-motion="lite"] .atelier-fx-layer { display: none !important; }
+/* 界面动效「关闭」：与系统“减少动画”一致 */
+html[data-motion="off"] *, html[data-motion="off"] *::before, html[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+html[data-motion="off"] .atelier-fx-layer { display: none !important; }
+
+/* ───────── 全局：选中色与焦点环兜底 ───────── */
+::selection { background: color-mix(in srgb, var(--color-accent) 26%, transparent); color: inherit; }
+html[data-theme="nightink"] ::selection { background: color-mix(in srgb, var(--color-accent) 36%, transparent); }
+#composerInput { caret-color: var(--color-accent); }
+.model-option-check { color: var(--color-accent); }
+
+/* 焦点环兜底：只对没有自定义样式的可交互元素生效（:where 零特异性，不覆盖已有规则） */
+:where(button, [role="button"], a[href], summary, select, [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 滚动条统一跟随主题 */
+html { scrollbar-color: var(--color-scrollbar) transparent; }
+:where(dialog, .modal, .drawer, .client-settings, .cs-body, .work-dock) { scrollbar-width: thin; scrollbar-color: var(--color-scrollbar) transparent; }
+
+/* 全局减少动态效果：系统开启“减少动画”时，所有无限动画与过渡一并收敛（含之前未覆盖的呼吸、脉冲、跳点等） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dimension-toast, .dimension-toast.is-leaving, .chat-connection-dot, .send-btn.is-waiting::after { animation: none !important; }
+}

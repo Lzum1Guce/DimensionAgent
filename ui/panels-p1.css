@@ -1,0 +1,171 @@
+/* 功能面板 P1：公共表情库（stickers.js）
+   选择器统一带 html 前缀 + .sticker-dialog.sticker-p1，以覆盖 styles.css 中的旧样式及 nightink 覆盖层。
+   只使用主题 token，兼容 paperlight / warmamber / nightink。 */
+
+html .sticker-dialog.sticker-p1 {
+  width: min(560px, 92vw);
+  max-height: min(78vh, 720px);
+  padding: 18px 20px 20px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 18px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-lg);
+  overflow: auto;
+}
+
+html .sticker-dialog.sticker-p1 .sticker-p1-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+html .sticker-dialog.sticker-p1 .sticker-p1-head strong { font-size: 16px; }
+
+html .sticker-dialog.sticker-p1 button {
+  font: inherit;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+html .sticker-dialog.sticker-p1 button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+html .sticker-dialog.sticker-p1 button.close {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 10px;
+  background: var(--color-raised);
+}
+html .sticker-dialog.sticker-p1 button.close:hover { background: var(--color-menu-hover); }
+
+html .sticker-dialog.sticker-p1 .sticker-p1-sub {
+  margin: 6px 0 14px;
+  font-size: 12px;
+  color: var(--color-ink-secondary);
+}
+
+html .sticker-dialog.sticker-p1 .sticker-p1-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+html .sticker-dialog.sticker-p1 button.sticker-add {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font-weight: 600;
+}
+html .sticker-dialog.sticker-p1 button.sticker-add:hover { filter: brightness(1.06); }
+html .sticker-dialog.sticker-p1 button.sticker-add:disabled { opacity: .6; cursor: progress; }
+html .sticker-dialog.sticker-p1 .sticker-file { display: none !important; }
+html .sticker-dialog.sticker-p1 .sticker-p1-status {
+  font-size: 12px;
+  color: var(--color-ink-secondary);
+}
+html .sticker-dialog.sticker-p1 .sticker-p1-status[data-level="error"] { color: var(--color-danger); }
+html .sticker-dialog.sticker-p1 .sticker-p1-status[data-level="success"] { color: var(--color-success, var(--color-ink-secondary)); }
+
+html .sticker-dialog.sticker-p1 .sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+html .sticker-dialog.sticker-p1 .sticker-item { position: relative; min-width: 0; }
+html .sticker-dialog.sticker-p1 button.sticker-pick {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 6px;
+  border: 1px solid var(--color-hairline);
+  border-radius: 12px;
+  background: var(--color-inset);
+  transition: border-color .15s, background .15s;
+}
+html .sticker-dialog.sticker-p1 button.sticker-pick:hover {
+  border-color: var(--color-accent);
+  background: var(--color-menu-hover);
+}
+html .sticker-dialog.sticker-p1 .sticker-pick img {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  border-radius: 6px;
+}
+html .sticker-dialog.sticker-p1 .sticker-pick span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-ink-secondary);
+}
+
+/* 删除：悬停/聚焦时出现在缩略图右上角的小 × */
+html .sticker-dialog.sticker-p1 button.sticker-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 999px;
+  background: var(--color-raised);
+  color: var(--color-ink-secondary);
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: scale(.85);
+  transition: opacity .12s, transform .12s, background .12s, color .12s;
+}
+html .sticker-dialog.sticker-p1 .sticker-item:hover button.sticker-remove,
+html .sticker-dialog.sticker-p1 .sticker-item:focus-within button.sticker-remove,
+html .sticker-dialog.sticker-p1 button.sticker-remove:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+html .sticker-dialog.sticker-p1 button.sticker-remove:hover {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: var(--color-accent-ink);
+}
+@media (hover: none) {
+  html .sticker-dialog.sticker-p1 button.sticker-remove { opacity: 1; transform: none; }
+}
+
+html .sticker-dialog.sticker-p1 .sticker-loading {
+  grid-column: 1 / -1;
+  margin: 24px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-ink-tertiary);
+}
+html .sticker-dialog.sticker-p1 .sticker-empty {
+  grid-column: 1 / -1;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 32px 16px;
+  border: 1px dashed var(--color-composer-ring);
+  border-radius: 14px;
+  background: var(--color-inset);
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-ink-secondary);
+}
+html .sticker-dialog.sticker-p1 .sticker-empty strong { font-size: 14px; color: var(--color-ink); }
+html .sticker-dialog.sticker-p1 .sticker-empty-icon { font-size: 22px; color: var(--color-accent); }

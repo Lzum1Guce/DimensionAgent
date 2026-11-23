@@ -1,0 +1,25 @@
+.task-template-dialog { width:min(980px,calc(100vw - 32px)); }
+.task-template-toolbar { display:flex; justify-content:flex-end; margin:10px 0 14px; }
+.task-template-layout { display:grid; grid-template-columns:minmax(220px,1fr) minmax(0,1.5fr); gap:20px; align-items:start; }
+.task-template-list { display:flex; flex-direction:column; gap:10px; max-height:52vh; overflow:auto; padding-right:4px; }
+.task-template-card { box-sizing:border-box; padding:12px; border:1px solid var(--color-hairline); border-radius:11px; background:var(--color-raised); overflow-wrap:anywhere; }
+.task-template-card.active { border-color:var(--color-accent-border); }
+.task-template-card-edit { display:block; width:100%; padding:0!important; border:0!important; background:transparent!important; text-align:left; font-weight:650; }
+.task-template-card small { display:block; margin-top:5px; color:var(--color-ink-secondary); }
+.task-template-card p { margin:8px 0; max-height:66px; overflow:auto; white-space:pre-wrap; font-size:12px; color:var(--color-ink-secondary); }
+.task-template-use-open { margin-top:8px; }
+.task-template-editor h3,.task-template-use h3 { margin:0 0 12px; font-size:16px; }
+.task-template-editor textarea[name=description] { min-height:72px; }
+.task-template-editor textarea[name=body] { min-height:220px; white-space:pre-wrap; }
+.task-template-use { margin-top:22px; padding-top:18px; border-top:1px solid var(--color-hairline); }
+.task-template-use-name,.task-template-target,.task-template-use-note { font-size:13px; line-height:1.6; }
+.task-template-target { padding:10px 12px; border-radius:8px; background:var(--color-raised); font-weight:600; overflow-wrap:anywhere; }
+.task-template-preview { box-sizing:border-box; max-height:180px; overflow:auto; padding:12px; border:1px solid var(--color-hairline); border-radius:8px; background:var(--color-raised); white-space:pre-wrap; overflow-wrap:anywhere; font-size: 12px; line-height: 1.65; }
+.task-template-use-note,.task-template-empty { color:var(--color-ink-secondary); }
+.task-template-use-submit { background:var(--color-accent); border-color:var(--color-accent); color:var(--color-accent-ink); }
+.task-template-delete { color:var(--color-danger); }
+@media(max-width:720px) {
+  .task-template-layout { grid-template-columns:1fr; }
+  .task-template-list { max-height:220px; }
+  .task-template-dialog { padding:16px; }
+}

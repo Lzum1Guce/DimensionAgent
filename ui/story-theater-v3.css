@@ -1,0 +1,1025 @@
+/* ============================================================================
+ * Story Theater v3 Stylesheet — Refined Editorial & Visual Novel Luxury Aesthetic
+ * Zero emojis, crisp monochrome SVG icons, generous breathing room & clean hierarchy
+ * ============================================================================ */
+
+/* --- Shared SVG Icon Alignment --- */
+.stv3-ico {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: -2px;
+  opacity: 0.9;
+}
+.stv3-ico.is-lg {
+  width: 17px;
+  height: 17px;
+}
+.stv3-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 8px currentColor;
+}
+.stv3-count {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 999px;
+  background: rgba(217, 119, 87, 0.14);
+  color: inherit;
+  opacity: 0.9;
+}
+
+/* --- Normal Mode Composer-Top Story Stage Bar Beautification --- */
+.story-stage-bar {
+  margin-bottom: 12px !important;
+  padding: 14px 18px !important;
+  border-radius: 16px !important;
+  gap: 12px !important;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--color-raised) 96%, var(--color-accent) 4%),
+    var(--color-raised)
+  ) !important;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 24%, var(--color-composer-ring)) !important;
+  box-shadow: 0 8px 26px rgba(32, 22, 16, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.45) !important;
+}
+html[data-theme="nightink"] .story-stage-bar {
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 240, 214, 0.08) !important;
+}
+.story-stage-top {
+  gap: 12px 16px !important;
+  min-height: 32px;
+}
+.story-stage-status {
+  gap: 10px !important;
+  font-size: 13px !important;
+  letter-spacing: 0.01em;
+}
+.story-stage-pill {
+  padding: 3px 10px !important;
+  font-size: 11.5px !important;
+  letter-spacing: 0.04em;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent);
+}
+.story-stage-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--color-composer-ring);
+  opacity: 0.7;
+}
+.story-stage-submeta {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-muted, #7c756b);
+}
+.story-stage-actions {
+  gap: 8px !important;
+}
+.story-stage-btn {
+  height: 30px !important;
+  padding: 0 13px !important;
+  font-size: 12px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: 0.01em;
+  transition: all 0.16s ease !important;
+}
+.story-stage-btn:hover {
+  transform: translateY(-1px);
+}
+
+/* Spacious, airy v3 Feature Navigation Row in Normal Mode */
+.story-v3-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--color-composer-ring) 72%, transparent);
+}
+.story-v3-chip {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-composer-ring) 85%, transparent);
+  background: color-mix(in srgb, var(--color-inset) 88%, transparent);
+  color: var(--color-ink);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.16s ease;
+}
+.story-v3-chip:hover {
+  border-color: color-mix(in srgb, var(--color-accent) 62%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-raised));
+  color: var(--color-accent);
+  transform: translateY(-1px);
+}
+.story-v3-chip.is-active {
+  border-color: color-mix(in srgb, var(--color-accent) 56%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 13%, var(--color-raised));
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.story-v3-chip.is-ending {
+  margin-left: auto;
+  border-color: color-mix(in srgb, var(--color-accent) 68%, transparent);
+  background: linear-gradient(135deg, #d98849, #c46238);
+  color: #fffaf3;
+  font-weight: 600;
+  box-shadow: 0 3px 12px rgba(217, 119, 87, 0.28);
+}
+.story-v3-chip.is-ending:hover {
+  color: #fffaf3;
+  filter: brightness(1.06);
+}
+.story-v3-chip.is-finale-plain {
+  margin-left: auto;
+}
+
+.story-fork-box {
+  padding-top: 11px !important;
+  gap: 9px !important;
+  border-top: 1px solid color-mix(in srgb, var(--color-composer-ring) 72%, transparent) !important;
+}
+.story-fork-prompt {
+  font-size: 12.5px !important;
+  letter-spacing: 0.01em;
+}
+.story-fork-choices {
+  gap: 7px !important;
+}
+.story-fork-choice-btn {
+  padding: 9px 13px !important;
+  border-radius: 11px !important;
+  font-size: 12.5px !important;
+  line-height: 1.5 !important;
+}
+.story-rewrite-row {
+  gap: 8px !important;
+  margin-top: 2px;
+}
+.story-rewrite-input {
+  height: 34px !important;
+  padding: 0 12px !important;
+  border-radius: 10px !important;
+  font-size: 12.5px !important;
+}
+
+/* --- Immersive Stage Compact Top HUD + Airy "Director Deck" Dropdown --- */
+.gal-story-hud {
+  top: 18px !important;
+  gap: 10px !important;
+  padding: 7px 12px 7px 18px !important;
+  background: rgba(24, 19, 26, 0.68) !important;
+  border: 1px solid rgba(240, 210, 158, 0.32) !important;
+  box-shadow: 0 10px 30px rgba(10, 8, 14, 0.34), inset 0 1px 0 rgba(255, 244, 224, 0.14) !important;
+}
+.gal-hud-sep {
+  width: 1px;
+  height: 14px;
+  background: rgba(240, 210, 158, 0.24);
+  flex-shrink: 0;
+}
+.gal-story-hud-btn {
+  padding: 4px 12px !important;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.gal-story-hud-btn.is-deck-toggle {
+  background: rgba(255, 248, 236, 0.09);
+  border-color: rgba(240, 210, 158, 0.36);
+}
+.gal-story-hud-btn.is-deck-toggle.is-open,
+.gal-story-hud-btn.is-deck-toggle:hover {
+  background: rgba(240, 198, 128, 0.24);
+  border-color: rgba(246, 214, 154, 0.72);
+}
+.gal-story-hud-btn.is-ending-alert {
+  background: linear-gradient(135deg, #e5a94c, #c76238);
+  color: #fffaf2;
+  border-color: rgba(255, 234, 188, 0.78);
+  box-shadow: 0 4px 14px rgba(217, 119, 87, 0.35);
+}
+
+/* Immersive Floating Director Deck (2x3 spacious grid below HUD) */
+.gal-director-deck {
+  position: absolute;
+  top: 66px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 42;
+  width: min(636px, calc(100vw - 36px));
+  padding: 16px 18px 18px;
+  border-radius: 18px;
+  background: linear-gradient(165deg, rgba(28, 22, 32, 0.94), rgba(18, 15, 23, 0.96));
+  border: 1px solid rgba(240, 206, 146, 0.34);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.52), inset 0 1px 0 rgba(255, 242, 218, 0.14);
+  color: #f6eee2;
+  animation: stv3DeckDrop 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.gal-director-deck[hidden] { display: none !important; }
+.gal-stage.is-ui-hidden .gal-director-deck {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+@keyframes stv3DeckDrop {
+  from { opacity: 0; transform: translate(-50%, -8px) scale(0.985); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.gal-deck-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(240, 206, 146, 0.16);
+}
+.gal-deck-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #f4d498;
+}
+.gal-deck-sub {
+  font-size: 11.5px;
+  color: rgba(246, 238, 226, 0.56);
+}
+.gal-deck-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (max-width: 640px) {
+  .gal-deck-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.gal-deck-card {
+  appearance: none;
+  text-align: left;
+  padding: 13px 14px;
+  border-radius: 13px;
+  border: 1px solid rgba(240, 206, 146, 0.18);
+  background: rgba(255, 249, 238, 0.045);
+  color: #f6eee2;
+  cursor: pointer;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  transition: all 0.17s ease;
+}
+.gal-deck-card:hover {
+  border-color: rgba(244, 208, 146, 0.56);
+  background: rgba(244, 208, 146, 0.12);
+  transform: translateY(-1px);
+}
+.gal-deck-card.is-on {
+  border-color: rgba(240, 184, 102, 0.62);
+  background: rgba(217, 134, 68, 0.18);
+}
+.gal-deck-card.is-gold {
+  border-color: rgba(244, 200, 118, 0.68);
+  background: linear-gradient(145deg, rgba(226, 162, 74, 0.24), rgba(196, 98, 56, 0.18));
+}
+.gal-deck-card-ico {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: rgba(244, 208, 146, 0.12);
+  border: 1px solid rgba(244, 208, 146, 0.22);
+  color: #f4d397;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.gal-deck-card.is-on .gal-deck-card-ico,
+.gal-deck-card.is-gold .gal-deck-card-ico {
+  background: rgba(240, 184, 102, 0.26);
+  border-color: rgba(248, 214, 152, 0.52);
+  color: #ffebc4;
+}
+.gal-deck-card-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.gal-deck-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fcf4e7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gal-deck-card-meta {
+  font-size: 11px;
+  line-height: 1.35;
+  color: rgba(246, 238, 226, 0.62);
+}
+
+/* --- Shared Modal Backdrop (works in both Normal and Immersive Galgame stage) --- */
+.stv3-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 360;
+  background: rgba(12, 10, 16, 0.72);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: stv3FadeIn 0.22s ease;
+}
+.stv3-modal-backdrop[hidden] { display: none !important; }
+
+@keyframes stv3FadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.stv3-modal {
+  width: min(760px, 94vw);
+  max-height: min(84vh, 760px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background: linear-gradient(165deg, rgba(31, 25, 34, 0.97), rgba(20, 17, 25, 0.98));
+  border: 1px solid rgba(235, 199, 134, 0.34);
+  box-shadow: 0 28px 68px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 240, 210, 0.14);
+  color: #f4ece0;
+  overflow: hidden;
+  font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+}
+.stv3-modal.is-wide { width: min(940px, 95vw); }
+
+.stv3-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 22px;
+  border-bottom: 1px solid rgba(235, 199, 134, 0.18);
+  background: rgba(255, 245, 224, 0.03);
+}
+.stv3-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #f7deb0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.stv3-modal-sub {
+  font-size: 12px;
+  color: rgba(244, 236, 224, 0.65);
+  margin-top: 4px;
+}
+.stv3-close-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4ece0;
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.16s ease, transform 0.16s ease;
+}
+.stv3-close-btn:hover { background: rgba(235, 199, 134, 0.22); transform: scale(1.06); }
+
+.stv3-modal-body {
+  padding: 20px 22px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.stv3-modal-foot {
+  padding: 14px 22px;
+  border-top: 1px solid rgba(235, 199, 134, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.stv3-btn {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(235, 199, 134, 0.34);
+  background: rgba(255, 245, 224, 0.08);
+  color: #f5ead8;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.16s ease;
+}
+.stv3-btn:hover:not(:disabled) {
+  background: rgba(235, 199, 134, 0.22);
+  border-color: rgba(247, 217, 156, 0.62);
+}
+.stv3-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.stv3-btn.is-primary {
+  background: linear-gradient(135deg, #d98c4a, #c76b3d);
+  border-color: rgba(255, 226, 179, 0.55);
+  color: #fffaf2;
+  box-shadow: 0 4px 14px rgba(217, 119, 87, 0.35);
+}
+.stv3-btn.is-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.stv3-textarea, .stv3-input {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 11px;
+  border: 1px solid rgba(235, 199, 134, 0.28);
+  background: rgba(12, 10, 16, 0.62);
+  color: #f7efe2;
+  padding: 11px 13px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  font-family: inherit;
+  resize: vertical;
+}
+.stv3-textarea:focus, .stv3-input:focus {
+  outline: none;
+  border-color: rgba(244, 196, 116, 0.72);
+  box-shadow: 0 0 0 2px rgba(244, 196, 116, 0.16);
+}
+
+/* --- 1. Story Bible --- */
+.stv3-bible-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: rgba(244, 236, 224, 0.74);
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: rgba(235, 199, 134, 0.08);
+  border: 1px solid rgba(235, 199, 134, 0.18);
+}
+
+/* --- 2. Director Secret Notes & Inner Voice OS --- */
+.stv3-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 12px;
+}
+.stv3-toggle-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 15px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(235, 199, 134, 0.18);
+  cursor: pointer;
+}
+.stv3-toggle-card strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #f6e1bc;
+  margin-bottom: 4px;
+}
+.stv3-toggle-card span { display: block; font-size: 11.5px; color: rgba(244, 236, 224, 0.64); line-height: 1.5; }
+.stv3-toggle-card input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: #d98c4a;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.stv3-secret-list {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.stv3-secret-row {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(235, 199, 134, 0.16);
+}
+.stv3-secret-row.has-note {
+  border-color: rgba(235, 179, 102, 0.5);
+  background: rgba(235, 179, 102, 0.08);
+}
+.stv3-secret-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #f6e1bc;
+}
+.stv3-secret-badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(217, 140, 74, 0.25);
+  color: #ffd79e;
+  border: 1px solid rgba(255, 215, 158, 0.35);
+}
+
+/* Inner Voice OS Bubble (Immersive & Normal — sleek, zero emoji) */
+.gal-os-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 5px 13px;
+  border-radius: 999px;
+  background: rgba(34, 27, 48, 0.78);
+  border: 1px solid rgba(206, 184, 248, 0.36);
+  color: #e6dbff;
+  font-size: 12.5px;
+  line-height: 1.45;
+  font-style: italic;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+  animation: stv3FadeIn 0.28s ease;
+}
+.gal-os-chip[hidden] { display: none !important; }
+.chat-os-bubble {
+  margin-top: 8px;
+  padding: 6px 11px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  border-left: 2.5px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  color: var(--color-muted, #766891);
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* --- 3. Director Stage Visual FX Layer & BGM Popover --- */
+.gal-director-fx-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9;
+  overflow: hidden;
+  transition: background 0.9s ease, opacity 0.6s ease;
+}
+.gal-director-fx-layer[data-mood="tense"] {
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(8, 16, 36, 0.52) 100%);
+}
+.gal-director-fx-layer[data-mood="battle"] {
+  background: radial-gradient(ellipse at center, transparent 46%, rgba(82, 16, 18, 0.44) 100%);
+}
+.gal-director-fx-layer[data-mood="warm"] {
+  background: radial-gradient(ellipse at 50% 35%, rgba(255, 206, 134, 0.14) 0%, transparent 68%);
+}
+.gal-director-fx-layer[data-mood="night"] {
+  background: radial-gradient(ellipse at center, transparent 45%, rgba(12, 14, 34, 0.45) 100%);
+}
+.gal-director-fx-layer.fx-rain::before {
+  content: "";
+  position: absolute;
+  inset: -40px;
+  background-image: repeating-linear-gradient(
+    102deg,
+    rgba(210, 232, 255, 0) 0px,
+    rgba(210, 232, 255, 0) 24px,
+    rgba(210, 232, 255, 0.24) 25px,
+    rgba(210, 232, 255, 0) 26px
+  );
+  background-size: 120px 180px;
+  animation: stv3RainFall 0.65s linear infinite;
+  opacity: 0.72;
+}
+@keyframes stv3RainFall {
+  from { transform: translate3d(0, -32px, 0); }
+  to { transform: translate3d(-14px, 32px, 0); }
+}
+.gal-director-fx-layer.fx-petals::before {
+  content: "";
+  position: absolute;
+  inset: -20px;
+  background-image:
+    radial-gradient(circle 4px at 14% 22%, rgba(255, 204, 224, 0.8), transparent 65%),
+    radial-gradient(circle 3px at 38% 12%, rgba(255, 236, 179, 0.75), transparent 65%),
+    radial-gradient(circle 5px at 66% 28%, rgba(255, 198, 220, 0.75), transparent 65%),
+    radial-gradient(circle 3.5px at 84% 18%, rgba(255, 228, 196, 0.8), transparent 65%),
+    radial-gradient(circle 4px at 26% 62%, rgba(255, 210, 228, 0.7), transparent 65%),
+    radial-gradient(circle 3px at 74% 58%, rgba(255, 236, 179, 0.7), transparent 65%);
+  animation: stv3PetalDrift 8s ease-in-out infinite alternate;
+}
+@keyframes stv3PetalDrift {
+  from { transform: translate3d(-14px, -18px, 0) rotate(-1deg); }
+  to { transform: translate3d(18px, 24px, 0) rotate(2deg); }
+}
+.gal-director-fx-layer.fx-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #fff9ef;
+  animation: stv3FlashBurst 0.55s ease-out forwards;
+}
+@keyframes stv3FlashBurst {
+  0% { opacity: 0.82; }
+  100% { opacity: 0; }
+}
+.gal-stage.is-director-shake {
+  animation: stv3StageShake 0.46s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+@keyframes stv3StageShake {
+  10%, 90% { transform: translate3d(-3px, 1px, 0); }
+  20%, 80% { transform: translate3d(5px, -2px, 0); }
+  30%, 50%, 70% { transform: translate3d(-6px, 2px, 0); }
+  40%, 60% { transform: translate3d(6px, -1px, 0); }
+}
+
+/* BGM Popover rows */
+.gal-bgm-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 10px 0 2px;
+}
+.gal-bgm-track-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.gal-bgm-track-row.is-active {
+  border-color: rgba(240, 198, 122, 0.65);
+  background: rgba(240, 198, 122, 0.16);
+}
+.gal-bgm-track-pick {
+  flex: 1;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.gal-bgm-track-pick strong { display: block; font-size: 12.5px; }
+.gal-bgm-track-pick span { display: block; font-size: 11px; opacity: 0.68; margin-top: 2px; }
+.gal-bgm-mini-btn {
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(235, 199, 134, 0.34);
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  cursor: pointer;
+}
+.gal-bgm-mini-btn:hover { background: rgba(235, 199, 134, 0.25); }
+
+/* --- 4. Worldline Flowchart Tree & Finale Ending Card --- */
+.stv3-tree-wrap {
+  position: relative;
+  overflow: auto;
+  padding: 18px;
+  border-radius: 14px;
+  background: radial-gradient(circle at top left, rgba(235, 199, 134, 0.08), rgba(10, 8, 14, 0.72));
+  border: 1px solid rgba(235, 199, 134, 0.2);
+  min-height: 260px;
+}
+.stv3-tree-canvas {
+  position: relative;
+}
+.stv3-tree-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.stv3-tree-node {
+  position: absolute;
+  width: 214px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(36, 29, 42, 0.94);
+  border: 1px solid rgba(235, 199, 134, 0.32);
+  color: #f4ece0;
+  cursor: pointer;
+  text-align: left;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32);
+}
+.stv3-tree-node:hover {
+  transform: translateY(-2px);
+  border-color: rgba(248, 212, 142, 0.85);
+  box-shadow: 0 10px 24px rgba(217, 140, 74, 0.28);
+}
+.stv3-tree-node.is-latest {
+  border-color: #f0b96b;
+  background: linear-gradient(145deg, rgba(64, 43, 30, 0.96), rgba(36, 26, 38, 0.96));
+}
+.stv3-tree-node-wl {
+  font-size: 10.5px;
+  color: #f0c27d;
+  font-weight: 700;
+  margin-bottom: 4px;
+  letter-spacing: 0.03em;
+}
+.stv3-tree-node-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.stv3-tree-rewind-bar {
+  margin-top: 12px;
+  padding: 13px 15px;
+  border-radius: 12px;
+  background: rgba(235, 199, 134, 0.1);
+  border: 1px solid rgba(235, 199, 134, 0.36);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stv3-tree-rewind-row {
+  display: flex;
+  gap: 10px;
+}
+
+/* Finale Ending Commemorative Card */
+.stv3-ending-card {
+  position: relative;
+  padding: 28px 30px;
+  border-radius: 16px;
+  background: radial-gradient(ellipse at top, rgba(226, 165, 86, 0.22), rgba(24, 18, 30, 0.96) 62%);
+  border: 1.5px solid rgba(245, 206, 135, 0.56);
+  box-shadow: 0 0 42px rgba(226, 165, 86, 0.2), inset 0 1px 0 rgba(255, 240, 210, 0.28);
+  text-align: center;
+}
+.stv3-ending-rank {
+  display: inline-block;
+  padding: 4px 15px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, #f3c87a, #d87f44);
+  color: #23160d;
+  margin-bottom: 12px;
+}
+.stv3-ending-title {
+  font-size: 24px;
+  font-weight: 800;
+  color: #fff3da;
+  letter-spacing: 0.04em;
+  margin: 0 0 12px;
+}
+.stv3-ending-summary {
+  font-size: 14px;
+  line-height: 1.8;
+  color: rgba(248, 239, 224, 0.88);
+  max-width: 620px;
+  margin: 0 auto 20px;
+}
+.stv3-ending-epilogues {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+  text-align: left;
+}
+.stv3-ending-ep-item {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 250, 240, 0.06);
+  border: 1px solid rgba(235, 199, 134, 0.22);
+}
+.stv3-ending-ep-item strong {
+  display: block;
+  font-size: 12.5px;
+  color: #f7d598;
+  margin-bottom: 5px;
+}
+.stv3-ending-ep-item p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: rgba(244, 236, 224, 0.84);
+}
+
+/* --- 5. TRPG D20 Fate Dice Overlay --- */
+.stv3-dice-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 420;
+  background: rgba(10, 8, 16, 0.72);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: stv3FadeIn 0.18s ease;
+}
+.stv3-dice-box {
+  width: min(390px, 90vw);
+  padding: 28px 26px;
+  border-radius: 22px;
+  background: radial-gradient(circle at 50% 25%, rgba(232, 175, 92, 0.22), rgba(22, 18, 30, 0.96) 70%);
+  border: 1.5px solid rgba(244, 200, 124, 0.55);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.6);
+  text-align: center;
+  color: #f9efdf;
+}
+.stv3-dice-action {
+  font-size: 13px;
+  color: rgba(249, 239, 223, 0.78);
+  margin-bottom: 18px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.stv3-d20-stage {
+  position: relative;
+  width: 124px;
+  height: 124px;
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.stv3-d20-svg {
+  width: 124px;
+  height: 124px;
+  filter: drop-shadow(0 8px 22px rgba(236, 169, 77, 0.45));
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.stv3-d20-stage.is-rolling .stv3-d20-svg {
+  animation: stv3DiceSpin 0.32s linear infinite;
+}
+@keyframes stv3DiceSpin {
+  0% { transform: rotate(0deg) scale(0.95); }
+  50% { transform: rotate(180deg) scale(1.08); }
+  100% { transform: rotate(360deg) scale(0.95); }
+}
+.stv3-d20-num {
+  position: absolute;
+  font-size: 36px;
+  font-weight: 900;
+  color: #fffaf0;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.72);
+  pointer-events: none;
+}
+.stv3-dice-tier {
+  font-size: 15.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  min-height: 24px;
+}
+.stv3-dice-tier.tier-crit_success { color: #ffd970; text-shadow: 0 0 16px rgba(255, 217, 112, 0.65); }
+.stv3-dice-tier.tier-success { color: #7ee8a9; }
+.stv3-dice-tier.tier-fail { color: #f6b36b; }
+.stv3-dice-tier.tier-crit_fail { color: #ff7c7c; text-shadow: 0 0 16px rgba(255, 100, 100, 0.65); }
+
+/* --- 6. Story Templates & CG Gallery --- */
+.stv3-templates-wrap {
+  margin-bottom: 12px;
+}
+.stv3-templates-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-muted, #7a7267);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.stv3-templates-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.stv3-tpl-chip {
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid rgba(180, 150, 110, 0.28);
+  background: rgba(217, 119, 87, 0.05);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.stv3-tpl-chip:hover {
+  border-color: rgba(217, 119, 87, 0.62);
+  background: rgba(217, 119, 87, 0.13);
+  transform: translateY(-1px);
+}
+.stv3-tpl-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--color-accent, #c76b3d);
+  margin-bottom: 3px;
+}
+.stv3-tpl-chip strong { display: block; font-size: 12.5px; line-height: 1.35; }
+.stv3-tpl-chip span { display: block; font-size: 11px; opacity: 0.68; margin-top: 3px; line-height: 1.35; }
+
+.stv3-cg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(236px, 1fr));
+  gap: 16px;
+}
+.stv3-cg-card {
+  border-radius: 13px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(235, 199, 134, 0.24);
+  display: flex;
+  flex-direction: column;
+}
+.stv3-cg-thumb-btn {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border: none;
+  padding: 0;
+  background: #0e0b14;
+  cursor: pointer;
+  overflow: hidden;
+}
+.stv3-cg-thumb-btn img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.28s ease;
+}
+.stv3-cg-thumb-btn:hover img { transform: scale(1.04); }
+.stv3-cg-meta {
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.stv3-cg-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f6e2be;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stv3-cg-sub {
+  font-size: 11px;
+  color: rgba(244, 236, 224, 0.62);
+}
+.stv3-cg-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.stv3-cg-actions button {
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(235, 199, 134, 0.3);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4ece0;
+  cursor: pointer;
+}
+.stv3-cg-actions button:hover { background: rgba(235, 199, 134, 0.24); }
