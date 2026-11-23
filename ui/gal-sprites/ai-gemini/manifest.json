@@ -1,0 +1,86 @@
+{
+  "width": 848,
+  "height": 1264,
+  "patches": {
+    "happy": {
+      "base": "neutral",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/happy.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "blink": {
+      "base": "neutral",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/blink.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "starry": {
+      "base": "neutral",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/starry.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "speechless": {
+      "base": "serious",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/speechless.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "worried": {
+      "base": "shy",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/worried.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "gloomy": {
+      "base": "jealous",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/gloomy.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "shocked": {
+      "base": "curious",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/shocked.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    },
+    "content": {
+      "base": "gentle",
+      "url": "/dimension-ui/gal-sprites/ai-gemini/patches/content.webp",
+      "box": {
+        "left": 25.9434,
+        "top": 5.9335,
+        "width": 45.9906,
+        "height": 28.0063
+      }
+    }
+  }
+}
