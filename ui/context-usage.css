@@ -1,0 +1,31 @@
+.composer-row .context-usage {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-end;
+  flex: 0 0 auto;
+  gap: 5px;
+  min-width: 56px;
+  height: 36px;
+  margin: 0;
+  padding: 4px;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--color-ink-secondary, #77756f);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.context-usage-ring { display: block; flex: 0 0 16px; width: 16px; height: 16px; pointer-events: none; }
+.context-usage-track { stroke: var(--color-composer-ring, #d9d3c8); }
+.context-usage-progress { stroke: currentColor; stroke-linecap: round; }
+.context-usage-value { min-width: 25px; white-space: nowrap; text-align: left; font-variant-numeric: tabular-nums; }
+.context-usage[data-state="unknown"] .context-usage-progress { visibility: hidden; }
+.composer-row .context-usage:hover { background: var(--color-menu-hover, #2a27230a); }
+.composer-row .context-usage:focus-visible { outline: 2px solid var(--color-focus, #d97757); outline-offset: 2px; }
+@media (max-width: 480px) {
+  .composer-row .context-usage { min-width: 48px; padding: 4px 2px; gap: 3px; font-size: 10px; }
+  .context-usage-value { min-width: 23px; }
+}

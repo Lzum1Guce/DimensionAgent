@@ -1,0 +1,28 @@
+DimensionAgent frontend — Lzum1Guce
+Copyright (c) 2026 Lzum1Guce
+
+The original DimensionAgent frontend and original native integration are
+attributed to Lzum1Guce. The primary MIT text is in the project LICENSE.
+The following section preserves separately licensed third-party source notices;
+it is not a list of authors of the DimensionAgent product.
+
+Retained source and dependency notices
+
+These UI files are a local snapshot of the existing DimensionAgent frontend,
+retained under the user's instruction to preserve that frontend. They are not a
+claim that every frontend component was independently written in this rewrite.
+Existing source notices are kept. In particular app.js identifies adapted
+OpenMausBot shell/UI interaction under Apache-2.0; its existing license and notice
+are copied verbatim into LICENSES/OpenMausBot-Apache-2.0.txt and
+LICENSES/OpenMausBot-NOTICE.txt. No new upstream business source was fetched.
+
+Original integration changes connect the retained frontend to the independently
+written native API, including Chat/Work rosters, task controls, scoped memory,
+archives, software desktops and result previews.
+
+The native conversation and Bot archive modules, task handoff controls and
+associated styles were written independently. They do not change the retained
+shell's applicable notices.
+
+Native C++ additions remain under the native project's LICENSE. That license
+does not replace the retained frontend's applicable third-party licenses.
