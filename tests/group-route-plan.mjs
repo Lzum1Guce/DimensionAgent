@@ -26,6 +26,9 @@ const server=http.createServer(async(req,res)=>{
   let text='';for await (const chunk of req)text+=chunk;
   const body=JSON.parse(text),lead=body.tools?.some(t=>t.function?.name==='delegate_work');
   calls.push({lead,body});
+  if(lead && body.messages.some(m=>m.role==='user' && m.content==='HOLD_ROUTE')){
+    res.writeHead(503);res.end();return;
+  }
   const upgrade=body.messages.some(m=>typeof m.content==='string'&&m.content.includes('UPGRADE_CASE'));
   if(!lead && upgrade && body.model===middle){res.writeHead(503);res.end();return;}
   const direct=upgrade || body.messages.some(m=>typeof m.content==='string'&&m.content.includes('DIRECT_CASE'));
@@ -36,7 +39,14 @@ const server=http.createServer(async(req,res)=>{
   const args={jobs:[{...(direct?{task:'核对编码交付'}:{id:'design',text:'制定验收方案'}),botId:'dispatch-member',routeTier:invalid?'catalog-only':upgrade?'standard':'complex',routeReason:'需要核对复杂边界',benchmarkCategory:'Reasoning'}]};
   if(poolTest) args.jobs[0].poolModel={providerId:'dispatch',model:poolCase.includes('DENIED')?ranked:'catalog-only'};
   if(typeof poolCase==="string" && poolCase.includes("NATIVE_ROUTE")) args.jobs[0].poolModel=nativeEntry;
-  const delta=lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:{content:'已处理。'};
+  if(body.messages.some(m=>m.role==='user' && m.content==='MULTI_APPROVAL')){
+    args.jobs=[
+      {id:'first',botId:'dispatch-member',text:'校验编码',routeReason:'执行编码',poolModel:nativeEntry},
+      {id:'second',botId:'dispatch-review',text:'审查设计',routeReason:'独立审查',poolModel:{providerId:'dispatch',model:'catalog-only'}},
+    ];
+  }
+  const picking=body.messages.some(m=>m.role==='system' && m.content?.startsWith('你负责模型分配'));
+  const delta=picking?{content:JSON.stringify(args)}:lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:{content:body.tools?.length?'已处理。':'先确定节日内容，再实现并测试。是否按此计划开始执行？'};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   res.end('data: '+JSON.stringify({choices:[{index:0,delta,finish_reason:delta.tool_calls?'tool_calls':'stop'}]})+'\n\ndata: [DONE]\n\n');
 });
@@ -46,14 +56,47 @@ try{
   app=await startNative({label:'dispatch-test',executable:path.resolve(exe),ui:path.resolve('ui'),data:path.join(output,'data'),output});
   const api=(...args)=>app.api(...args);
   await api('/api/providers',{name:'dispatch',entry:{kind:'openai-chat-compat',baseUrl:'http://127.0.0.1:'+server.address().port+'/v1',spec:{model:middle,maxTokens:4096}},secretValue:'test-only'});
-  for(const botId of ['dispatch-lead','dispatch-member']){
+  for(const botId of ['dispatch-lead','dispatch-member','dispatch-review']){
     await api('/api/dimension/bots',{id:botId,name:botId,persona:'测试成员'});
     await api('/api/dimension/bots/'+botId+'/roster',{mode:'work',present:true},'PATCH');
     await api('/api/dimension/bots/'+botId+'/conversation-model',{modelSelection:{providerId:'dispatch',model:middle}});
     await api('/api/dimension/work/settings',{botId,cliEngine:'builtin',workspaceMode:'windows_native',projectCwd:project,approvalMode:'full'},'PATCH');
   }
   await api('/api/dimension/work-models',{enabled:true,routes:{standard:{providerId:'dispatch',model:middle},complex:{providerId:'dispatch',model:ranked}}},'PUT');
-  const gid=(await api('/api/dimension/groups',{name:'Dispatch',ownerId:'dispatch-lead',members:['dispatch-lead','dispatch-member']})).group.id;
+  const gid=(await api('/api/dimension/groups',{name:'Dispatch',ownerId:'dispatch-lead',members:['dispatch-lead','dispatch-member','dispatch-review']})).group.id;
+  const idea = '我想做个星露谷插件';
+  let discussionRun = (await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:idea,requestId:'idea'})).run;
+  const discussionId = discussionRun.id;
+  for (const [index, text] of [idea, '加一个节日，细节还没确定', '等我说“开始做”再动手'].entries()) {
+    if (index) await api('/api/dimension/work/runs/'+discussionId+'/resume',{text,requestId:'idea-'+index});
+    for (let i=0;i<100;i++) {
+      discussionRun=await api('/api/dimension/work/runs/'+discussionId);
+      if (discussionRun.terminal) break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    assert.equal(discussionRun.status,'completed');
+    assert.equal(discussionRun.assignments.length,0);
+    const request=calls.findLast(x=>x.body.messages.some(m=>m.role==='user' && m.content===text));
+    assert(request && !request.body.tools?.length,'discussion exposed execution tools');
+  }
+  assert.equal(discussionRun.planPhase,'ready');
+  assert(discussionRun.answer.includes(ranked) && discussionRun.answer.includes('dispatch-member'));
+  assert.equal(discussionRun.routePlan.assignments.job1.model,ranked);
+  const persisted=discussionRun.routePlan;
+  await assert.rejects(api('/api/dimension/work/runs/'+discussionId+'/resume',{text:'开始',planAttempt:'1',requestId:'stale'}));
+  await app.stop();
+  app=await startNative({label:'restart-plan',executable:path.resolve(exe),ui:path.resolve('ui'),data:path.join(output,'data'),output});
+  assert.deepEqual((await api('/api/dimension/work/runs/'+discussionId)).routePlan,persisted);
+  const approvedAt=calls.length;
+  await api('/api/dimension/work/runs/'+discussionId+'/resume',{text:'开始做吧',requestId:'idea-start'});
+  for(let i=0;i<100 && !calls.slice(approvedAt).some(x=>x.lead);i++) await new Promise(resolve=>setTimeout(resolve,100));
+  const duplicate=await api('/api/dimension/work/runs/'+discussionId+'/resume',{text:'开始做吧',requestId:'idea-start'});
+  assert.equal(duplicate.run.attempt,discussionRun.attempt+1);
+  const approved=calls.slice(approvedAt).find(x=>x.lead);
+  assert(approved?.body.messages.some(m=>m.content===idea),'authorized execution must keep the original idea');
+  const finishedIdea=await settled(discussionId);
+  for(const job of finishedIdea.assignments) if(job.runId) await settled(job.runId);
+  console.log('PASS discussion, requirements follow-up, quoted confirmation and explicit start');
   for(const test of ['DIRECT_CASE','DELEGATE_CASE','UPGRADE_CASE','INVALID_CASE','POOL_PICK','POOL_DENIED']){
     const poolTest=test.startsWith('POOL_'), denied=test==='INVALID_CASE'||test==='POOL_DENIED';
     const expected=poolTest?'catalog-only':ranked;
@@ -66,14 +109,14 @@ try{
       assert.deepEqual((await api('/api/dimension/work-models',settings,'PUT')).settings.pool,choices);
     }
     const before=calls.length;
-    const run=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:test+' 只返回文本',requestId:test})).run;
+    const run=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'直接做，不用先出计划：'+test+' 只返回文本',deliveryMode:'queue',requestId:test})).run;
     let saved;
     for(let i=0;i<200;i++){
       saved=await api('/api/dimension/work/runs/'+run.id);
       if(saved.terminal && (denied || saved.assignments.some(a=>a.actualRoute?.model===expected) && calls.slice(before).some(r=>!r.lead && r.body.tools?.length > 0 && r.body.model===expected)))break;
       await new Promise(r=>setTimeout(r,180));
     }
-    const seen=calls.slice(before),lead=seen.find(r=>r.lead);
+    const seen=calls.slice(before),lead=seen.find(r=>r.lead && r.body.messages.some(m=>m.role==='user' && m.content.includes(test)));
     assert(lead,JSON.stringify(saved).slice(-1200));
     assert(lead.body.messages.some(m=>m.role==='system'&&m.content.includes(ranked)&&m.content.includes('accountAccess')),'missing coordinator inventory');
     if(denied){assert.equal(seen.filter(r=>!r.lead && r.body.tools?.length > 0).length,0);assert.equal(saved.assignments.length,0);continue;}
@@ -83,13 +126,50 @@ try{
     assert.equal(saved.assignments[0].actualRoute.model,expected);
     console.log(test,plan.text);
   }
+  const pending=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'HOLD_ROUTE',deliveryMode:'queue',requestId:'hold-plan'})).run;
+  async function settled(id){
+    for(let i=0;i<250;i++){
+      const r=await api('/api/dimension/work/runs/'+id);
+      if(r.terminal && !r.executing)return r;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    throw Error('run did not settle');
+  }
+  const held=await settled(pending.id);
+  assert.equal(held.planPhase,'ready');
+  const holdOffset=calls.length;
+  await api('/api/dimension/work/runs/'+pending.id+'/resume',{text:'执行',planAttempt:String(held.attempt),requestId:'hold-start'});
+  const interrupted=await settled(pending.id);
+  assert.equal(interrupted.status,'interrupted');
+  assert(interrupted.error.includes('重新') && interrupted.assignments.length===0);
+  assert(calls.slice(holdOffset).filter(x=>x.lead).every(x=>x.body.model===held.routePlan.lead.model));
+  assert(!interrupted.events.some(e=>e.kind==='tool'));
+  console.log('PASS unavailable approved coordinator pauses without switching models');
+  await api('/api/dimension/work/settings',{botId:'dispatch-lead',cliEngine:'qwen-code',cliModelSource:'native',
+    cliEngineConfig:{engineId:'qwen-code',modelSource:'native',model:'solo-fixture'}},'PATCH');
+  const solo=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',text:'创建一个节日插件',deliveryMode:'queue',requestId:'solo-plan'})).run;
+  let proposal;
+  for(let i=0;i<100;i++){
+    proposal=await api('/api/dimension/work/runs/'+solo.id);
+    if(proposal.terminal)break;
+    await new Promise(r=>setTimeout(r,100));
+  }
+  assert.equal(proposal.planPhase,'ready');
+  assert(proposal.answer.includes('solo-fixture') && proposal.routePlan.cli.engineId==='qwen-code');
+  await api('/api/dimension/work/settings',{botId:'dispatch-lead',cliEngine:'builtin'},'PATCH');
+  assert(!proposal.events.some(e=>e.kind==='tool'||e.kind==='cli-step'));
+  assert.equal(await readFile(marker,'utf8').catch(()=>''),'');
+  await api('/api/dimension/work/runs/'+solo.id+'/resume',{text:'执行',planAttempt:String(proposal.attempt),requestId:'solo-go'});
+  for(let i=0;i<150 && (await readFile(marker,'utf8').catch(()=>'' )).trim()!=='solo-fixture';i++)await new Promise(r=>setTimeout(r,100));
+  assert.equal((await readFile(marker,'utf8')).trim(),'solo-fixture');
+  console.log('PASS private CLI process starts only after explicit plan confirmation');
   const inventory=await api('/api/dimension/work-models');
   assert(inventory.cliModels.some(m=>m.engineId===nativeEntry.engineId && m.model===nativeEntry.model));
   const custom={...nativeEntry,model:'private-version',custom:true};
   const mixed=[{providerId:'dispatch',model:'catalog-only'},custom,nativeEntry];
   assert.deepEqual((await api('/api/dimension/work-models',{...inventory.settings,pool:mixed},'PUT')).settings.pool,mixed);
   await assert.rejects(api('/api/dimension/work-models',{...inventory.settings,pool:[{...custom,engineId:'unknown-cli'}]},'PUT'));
-  const nativeRun=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'NATIVE_ROUTE 只返回文本',requestId:'native'})).run;
+  const nativeRun=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'直接做，不用先出计划：NATIVE_ROUTE 只返回文本',requestId:'native'})).run;
   let receipt='';
   for(let i=0;i<150;i++){
     receipt=await readFile(marker,'utf8').catch(()=>'');
@@ -100,5 +180,26 @@ try{
   const report=await api('/api/dimension/work/runs/'+nativeRun.id);
   assert(report.events.some(e=>e.dispatchPlan && e.text.includes(nativeEntry.model)));
   console.log('PASS native CLI received selected model');
+  await settled(nativeRun.id);
+  const multi=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'MULTI_APPROVAL',deliveryMode:'queue',requestId:'multi-plan'})).run;
+  const published=await settled(multi.id);
+  assert.equal(published.planPhase,'ready');
+  assert.equal(published.assignments.length,0);
+  assert(published.answer.includes(nativeEntry.model) && published.answer.includes('catalog-only'));
+  await api('/api/dimension/work/runs/'+multi.id+'/resume',{text:'开始',planAttempt:String(published.attempt),requestId:'multi-go'});
+  let actual;
+  for(let i=0;i<200;i++){
+    actual=await api('/api/dimension/work/runs/'+multi.id);
+    if(actual.assignments.length===2 && actual.assignments.every(a=>a.actualRoute?.model))break;
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  assert.equal(actual.assignments.length,2);
+  for(const job of published.routePlan.jobs){
+    const child=await api('/api/dimension/work/runs/'+actual.assignments.find(a=>a.botId===job.botId).runId);
+    const expected=published.routePlan.assignments[job.id];
+    assert.equal(child.actualRoute.model,expected.model);
+    assert.equal(child.assignedRoute.cli?.model,expected.cli?.model);
+  }
+  console.log('PASS confirmed two-member mixed CLI/API assignment matches actual routes');
   console.log('PASS both dispatch paths and unconfigured route refusal');
 }finally{if(app)await app.stop();server.closeAllConnections();await new Promise(r=>server.close(r));}

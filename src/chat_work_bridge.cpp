@@ -330,7 +330,7 @@ public:
                 if (guard) guard(bot, "");
                 // queue=true is essential: unrelated Chat prose and explicit new
                 // tasks must never steer or inherit the active private run.
-                const auto submission = work.submit(bot, "", command->text, request_key, true);
+                const auto submission = work.submit(bot, "", command->text, request_key, true, {}, {}, true);
                 result["runId"] = submission.run_id;
                 observed = work.brief_json(submission.run_id);
             } else {
@@ -346,10 +346,10 @@ public:
                 else {
                     if (guard) guard(bot, str(record, "groupId"));
                     if (action == "add") (void)work.steer(run_id, command->text, request_key);
-                    else if (action == "resume") (void)work.resume(run_id, request_key, command->text);
+                    else if (action == "resume") (void)work.resume(run_id, request_key, command->text, {}, 0, true);
                     else if (action == "change") {
                         const auto decision = change_input(command->text);
-                        if (terminal(str(record, "status"))) (void)work.resume(run_id, request_key, decision);
+                        if (terminal(str(record, "status"))) (void)work.resume(run_id, request_key, decision, {}, 0, true);
                         else (void)work.steer(run_id, decision, request_key);
                     } else throw std::invalid_argument("Unsupported persisted Chat Work action");
                     observed = work.brief_json(run_id);

@@ -1747,6 +1747,9 @@ class Application::Impl {
         approvals = std::make_unique<ApprovalService>(options.data / L"approvals", approval_limits);
         approval_tools = std::make_unique<ApprovalToolQueue>(*approvals);
         c.configuration = [this](const auto &ctx) { return configuration(ctx); };
+        c.propose_routes = [this](const auto& ctx, const auto& route, const auto& history, const auto& plan, auto stop) {
+            return propose_work_routes(ctx, route, history, plan, stop);
+        };
         c.model_routes = [this](const auto &ctx) { return model_routes(ctx); };
         c.model = [this](const auto &config, const auto &messages, const auto &tools, auto chunk, auto stop) {
             return model_with_chat_images("work", config, messages, tools, std::move(chunk), stop);
@@ -1788,7 +1791,12 @@ class Application::Impl {
             return execute_tool(t, ctx, stop);
         };
         c.authorize_and_execute_tool = [this](const auto& t, const auto& ctx, auto execute_stop, auto gate_stop) {
-            return approved_tool(t, ctx, execute_stop, gate_stop);
+            try { return approved_tool(t, ctx, execute_stop, gate_stop); }
+            catch(const WorkRouteUnavailable& err){
+                ToolExecution paused{err.what(),true,O{{"no_side_effects",true}}};
+                paused.pause_reason=err.what();
+                return paused;
+            }
         };
         c.is_read_only_tool = [](std::string_view s) {
             return s == "read_file" || s == "list_files" || s == "grep_files" || s == "verify_file" || s == "team_status" || s == "github_status" || s == "inspect_group_routes" ||
@@ -3072,8 +3080,9 @@ class Application::Impl {
         return requested >= window ? window / 2 : requested;
     }
     std::vector<ModelRoute> model_routes(const RunExecutionContext &ctx, const std::string* preview=nullptr, const Json& choice={});
+    Json propose_work_routes(const RunExecutionContext&, const ModelRoute&, const std::vector<ModelMessage>&, const std::string&, std::stop_token);
     Json group_route_inventory(const RunExecutionContext&, std::stop_token);
-    std::map<std::string,Json> report_dispatch(const RunExecutionContext&, const Json&, bool, std::stop_token);
+    std::map<std::string,Json> report_dispatch(const RunExecutionContext&, const Json&, bool, std::stop_token, Json* proposal=nullptr, const Json* catalog=nullptr);
     ProviderCatalogQuery catalog_query(const std::string& id, const Json& provider);
     ModelReply budgeted_model(std::string_view, const ModelConfig &, const std::vector<ModelMessage> &,
                               const std::vector<ModelTool> &, ModelChunk, std::stop_token);
@@ -3580,7 +3589,9 @@ std::vector<ModelRoute> Application::Impl::model_routes(const RunExecutionContex
     if (!providers.find(default_id)) default_id = providers.as_object().empty() ? "" : providers.as_object().begin()->first;
     const auto brief=work->brief_json(ctx.run_id);
     auto text=preview?*preview:str(brief,"text");
-    const Json assigned=preview?choice:obj(brief,"assignedRoute");
+    const auto route_plan = obj(brief,"routePlan");
+    const bool approved = !preview && str(brief,"planPhase") == "approved" && route_plan.find("lead");
+    const Json assigned=preview?choice:approved?obj(route_plan,"lead"):obj(brief,"assignedRoute");
     if (!preview && !ctx.group_id.empty()) {
         const auto root_id = resolve_root_run_id(ctx.run_id);
         if (root_id != ctx.run_id) {
@@ -3623,12 +3634,18 @@ std::vector<ModelRoute> Application::Impl::model_routes(const RunExecutionContex
         }
     }
     std::string initial_tier=enabled?tiers[level]:"member";
-    if(!ctx.group_id.empty() && !str(assigned,"model").empty()){
+    if((approved || !ctx.group_id.empty()) && !str(assigned,"model").empty()){
         primary_selection=assigned; initial_tier=str(assigned,"tier","member");
         for(int i=0;i<3;i++)if(initial_tier==tiers[i])level=i;
     }
-    std::vector<ModelRoute> plan{resolve(initial_tier,primary_selection)};
-    if (initial_tier == "pool") return plan;
+    std::vector<ModelRoute> plan;
+    try { plan.push_back(resolve(initial_tier,primary_selection)); }
+    catch(const std::exception&){
+        if(approved || flag(assigned,"locked"))
+            throw WorkRouteUnavailable("已确认的模型配置不可用："+str(assigned,"providerId")+" / "+str(assigned,"model")+"。请更新方案后确认。");
+        throw;
+    }
+    if (approved || flag(assigned,"locked") || initial_tier == "pool") return plan;
     if (enabled) for (int index = level + 1; index < 3; ++index) {
         const auto* configured = routes.find(tiers[index]);
         if (!configured || !configured->is_object() || str(*configured, "providerId").empty() ||
@@ -3885,7 +3902,11 @@ std::string Application::Impl::prompt(const RunExecutionContext &ctx) {
         const auto group_run = work->get(ctx.run_id);
         const auto& group_inputs = group_run.at("inputs").as_array();
         const bool assigned = !group_inputs.empty() && str(group_inputs.front(), "requestId").starts_with("delegate:");
-        if (!assigned) {
+        const auto approved_routes=obj(group_run,"routePlan");
+        if(!assigned && str(group_run,"planPhase")=="approved" && approved_routes.find("jobs")){
+            s+="\n已确认的分工如下。按原 botId、text 派发各项职责；空数组由群主独立执行。"
+                "使用 send_member_task 时把 text 原样填入 task。成员模型由后端绑定。\n"+approved_routes.at("jobs").dump();
+        } else if (!assigned) {
             s += "\n【群共享工作台】：本群主与所有参战成员默认挂载同一个共享任务工作区目录（scope=task 下的 deliverables/ 与 scratch/ 全员实时互通可见；若已绑定本地项目，scope=project 同样全员共享同一工程根）。"
                  "\n【高水准团队协作三大阵型（严禁为凑人数把高耦合任务硬拆成碎片导致风格撕裂！）】：请像顶尖技术总监一样按任务性质选择最优阵型："
                  "\n① 阵型 A ·「1 主创一气呵成 + 1 魔鬼审校挑刺」（单页应用、高内聚代码模块、精密脚本或连贯设计首选！）：指派 1 名最擅长的成员完整实现初版写入共享 deliverables/；待其完工回传后，指派另 1 名成员担任严苛审校官（真实读取代码、运行语法/逻辑检查，专门挑出 Bug、视觉粗糙点、边界遗漏或违背用户约束处）；若发现实质缺陷，将审校清单发回主创成员在原会话中返工修到高水准，验收无误后再向用户交付！"
@@ -3997,9 +4018,20 @@ std::vector<ModelTool> Application::Impl::tool_specs(const RunExecutionContext &
     Json file_scope = O{{"type", "string"}, {"enum", A{"task", "project"}}};
     const bool native_win_mode = run_uses_windows_native(ctx);
     const bool sandbox_cli = sandbox_cli_required(ctx);
+    const auto run_record = work->brief_json(ctx.run_id);
+    const auto planned = obj(run_record,"routePlan");
+    const auto assignment = obj(run_record,"assignedRoute");
+    const bool locked = (str(run_record,"planPhase") == "approved" && planned.find("lead")) || flag(assignment,"locked");
+    const auto cli = planned.find("cli") ? obj(planned,"cli") : obj(assignment,"cli");
+    const bool allow_cli = locked ? cli.find("engineId") != nullptr : configured_cli_engine(ctx.bot_id) != "builtin";
+    if (locked && allow_cli) {
+        const auto installed = cached_cli_harnesses(false);
+        if (sandbox_cli || std::none_of(installed.begin(),installed.end(),[&](const auto& h){return h.installed && h.id==str(cli,"engineId");}))
+            throw WorkRouteUnavailable("已确认的 CLI "+str(cli,"engineId")+" 不可用，请选择内置 Work 模型或另一 CLI 后重新确认计划");
+    }
     const bool cli_broker_exclusive = !sandbox_cli && options.provider_file.empty() &&
                                       ctx.group_id.empty() &&
-                                      configured_cli_engine(ctx.bot_id) != "builtin" &&
+                                      allow_cli &&
                                       has_installed_cli_harness() &&
                                       plugin_adaptation_for(ctx).as_object().empty();
     std::vector<ModelTool> v{
@@ -4116,7 +4148,7 @@ std::vector<ModelTool> Application::Impl::tool_specs(const RunExecutionContext &
                              {"arguments", O{{"type", "object"}}}},
                             {"serverName", "action"})});
     }
-    if (!sandbox_cli && options.provider_file.empty() && (configured_cli_engine(ctx.bot_id) != "builtin" || obj(work->brief_json(ctx.run_id), "assignedRoute").find("cli")) && has_installed_cli_harness()) {
+    if (!sandbox_cli && options.provider_file.empty() && (allow_cli || assignment.find("cli")) && has_installed_cli_harness()) {
         v.push_back({"dispatch_native_cli",
                      "作为角色委托中间人，将工程开发/文件编写/代码检索/系统实操任务派发给满血原生 Agent CLI（Hermes / DeepSeek Harness / Kimi Code / Claude Code / Codex / OpenCode / Qwen / Gemini CLI）流式执行；可通过 equipSkills / equipMcpServers 将其他 Harness 的技能与 MCP 工具跨引擎配发给目标 CLI",
                      schema({{"task", string},
@@ -4195,6 +4227,12 @@ std::vector<ModelTool> Application::Impl::tool_specs(const RunExecutionContext &
             }
         }
     }
+    if (locked) std::erase_if(v,[&](const auto& tool) {
+        if (tool.name=="cli_agent_exec" || (tool.name=="dispatch_native_cli" && !allow_cli)) return true;
+        if (tool.name=="delegate_work" || tool.name=="send_member_task")
+            return !planned.find("jobs") || planned.at("jobs").as_array().empty();
+        return false;
+    });
     return v;
 }
 ToolExecution Application::Impl::approved_tool(const ToolCall& call, const RunExecutionContext& ctx,
@@ -5220,7 +5258,10 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
     }
     if (call.name == "dispatch_native_cli") {
         if (sandbox_cli_required(ctx)) throw ApiError(409, "沙盒工位请使用 WSL CLI 或 sandbox_exec");
-        const auto pinned_cli = obj(obj(work->brief_json(ctx.run_id), "assignedRoute"), "cli");
+        const auto record = work->brief_json(ctx.run_id);
+        const auto planned = obj(record,"routePlan");
+        const auto pinned_cli = planned.find("cli") && str(record,"planPhase")=="approved"
+            ? obj(planned,"cli") : obj(obj(record,"assignedRoute"), "cli");
         const bool direct = (ctx.group_id.empty() || pinned_cli.find("engineId")) && args.find("inputCount") && call.id.starts_with("cli-input-");
         const auto raw_task = direct ? work->cli_input(ctx.run_id, static_cast<std::size_t>(num(args, "inputCount", 0))) :
             required_string(args, "task");
@@ -5337,9 +5378,14 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
         // A pool assignment is already bound to the member run before dispatch.
         if (pinned_cli.find("engineId")) {
             hreq.engine_id = str(pinned_cli, "engineId");
-            hreq.model_source = "native";
+            hreq.model_source = str(pinned_cli,"modelSource","native");
+            if (hreq.model_source=="work") hreq.work_slot_model = work_model_configuration(required_string(pinned_cli,"providerId"),required_string(pinned_cli,"model"));
             hreq.native_model = str(pinned_cli, "model");
             hreq.native_provider = str(pinned_cli, "providerId");
+            if (pinned_cli.find("reasoningEffort")) {
+                hreq.work_slot_model.reasoning_effort=str(pinned_cli,"reasoningEffort");
+                if (!hreq.work_slot_model.reasoning_effort.empty()) hreq.work_slot_model.thinking_enabled=true;
+            }
             hreq.require_exact_engine = true;
         } else {
             std::error_code probe_ec;
@@ -5385,7 +5431,7 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
         const auto rules = project_instructions(ws_dir, ws_dir, target_scope == "project", preview_prep.engine_id);
         report_instructions(ctx, ws_dir, ws_dir, preview_prep.engine_id, rules);
         hreq.prompt += rules.text;
-        hreq.file_prompt_for_batch = hreq.require_exact_engine || !rules.text.empty();
+        hreq.file_prompt_for_batch = hreq.require_exact_engine || !rules.text.empty() || raw_task.find_first_of("\r\n") != raw_task.npos;
         A hard_arr;
         for (const auto& hc : hard_constraints.hard_constraints) hard_arr.push_back(hc);
         work->custom_event(ctx, "broker_enriched", O{
@@ -5418,6 +5464,9 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
             }
         }
         result.error = !cli_res.success;
+        if(result.error && !cli_res.cancelled && pinned_cli.find("engineId") &&
+                (planned.find("lead") || flag(obj(record,"assignedRoute"),"locked")))
+            result.pause_reason="已确认的 CLI "+str(pinned_cli,"engineId")+" 执行失败。请检查执行记录，重试原路线或改用内置 Work 后重新确认。";
         result.metadata = O{
             {"engineId", cli_res.resolved_engine_id},
             {"engineName", cli_res.resolved_engine_name},
@@ -6729,6 +6778,8 @@ void Application::Impl::notify_application_waiting(const Json& job) {
 
 void Application::Impl::notify_run_event(const Json& event) {
     if (stopping) return;
+    const auto phase = str(obj(event, "data"), "planPhase");
+    if (phase == "ready" || phase == "discussion") return;
     // Reminders receive a read-only event snapshot. They cannot dispatch or mutate Work.
     try { proactive_reminders.observe(event); } catch (...) {}
     // Living Memory, Time-Machine Checkpoint & Craft Evolution post-run hooks:
@@ -10433,7 +10484,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
             // A template contributes text only. A fresh queued run has no old
             // quote/context, approvals, credentials, grants or receipt history.
             const auto request_key = "template:" + id + ":" + request;
-            auto sub = work->submit(bid, gid, str(saved, "body"), request_key, true);
+            auto sub = work->submit(bid, gid, str(saved, "body"), request_key, true, {}, {}, true);
             meta.edit([&](O &m) {
                 auto activity = obj(m, "activity").as_object();
                 activity["work:" + (gid.empty() ? "bot:" + bid : "group:" + gid)] = iso();
@@ -10470,7 +10521,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
         else require_bot_roster(bid, Mode::Work);
         const auto request = str(body, "requestId", uid());
         auto sub = work->submit(bid, gid, str(body, "text"), request,
-                                str(body, "deliveryMode") == "queue", work_quote(body, bid, gid, request));
+                                str(body, "deliveryMode") == "queue", work_quote(body, bid, gid, request), {}, true);
         meta.edit([&](O &m) {
             auto a = obj(m, "activity").as_object();
             a["work:" + (gid.empty() ? "bot:" + bid : "group:" + gid)] = iso();
@@ -11065,7 +11116,11 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 require_group_member(str(record, "groupId"), str(record, "botId"), Mode::Work);
             else require_bot_roster(str(record, "botId"), Mode::Work);
             const auto request = str(body, "requestId", uid());
-            auto sub = work->resume(id, request, str(body, "text"), work_quote(body, str(record, "botId"), str(record, "groupId"), request));
+            const auto expected = uintstr(str(body, "planAttempt"));
+            if (body.find("planAttempt") && (!expected || expected > std::numeric_limits<unsigned>::max()))
+                throw ApiError(400, "计划版本无效，请刷新");
+            auto sub = work->resume(id, request, str(body, "text"), work_quote(body, str(record, "botId"), str(record, "groupId"), request),
+                static_cast<unsigned>(expected), true);
             return json(O{{"run", run_view(sub.run_id)}});
         }
         if (method == "DELETE") {
@@ -11801,33 +11856,8 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                     require_group_member(id, bid, Mode::Work);
                     const auto request = str(body, "requestId", uid());
                     const auto text = str(body, "text");
-                    auto sub = work->submit(bid, id, text, request, false, work_quote(body, bid, id, request));
+                    auto sub = work->submit(bid, id, text, request, false, work_quote(body, bid, id, request), {}, true);
                     A dispatched{O{{"botId", bid}, {"runId", sub.run_id}, {"role", specified || bid == owner ? "coordinator" : "member"}}};
-                    if (!specified) {
-                        for (auto &member : g.at("members").as_array()) {
-                            const auto mid = member.as_string();
-                            if (mid == bid) continue;
-                            try { require_group_member(id, mid, Mode::Work); }
-                            catch (...) { continue; }
-                            bool busy_member = false, same_work = false;
-                            for (auto &row : work->list(mid, "", 1000).as_array()) {
-                                if (!active(row)) continue;
-                                busy_member = true;
-                                if (str(row, "groupId") == id && str(row, "text") == text) same_work = true;
-                            }
-                            if (busy_member || same_work) continue;
-                            const auto child_request = request + ":auto:" + mid;
-                            auto child = work->submit(mid, id, text, child_request, false,
-                                                      work_quote(body, mid, id, child_request));
-                            meta.edit([&](O &m) {
-                                auto children = obj(m, "children").as_object();
-                                children[child.run_id] = O{{"child", true}, {"parent", sub.run_id},
-                                                           {"job", "auto:" + mid}, {"autoDispatch", true}};
-                                m["children"] = children;
-                            });
-                            dispatched.push_back(O{{"botId", mid}, {"runId", child.run_id}, {"role", "member"}});
-                        }
-                    }
                     HttpResponse r;
                     r.stream = [sub, dispatched](HttpStream &stream) {
                         stream.write(

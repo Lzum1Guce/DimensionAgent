@@ -662,7 +662,7 @@ function derivePackageTitle(run, deliverables) {
 }
 
 function renderDeliverablePackageZone({
-  run, files = [], changes = [], sandboxCheckouts = [], checkpoints = [], artOpenBtn, artifactStrip, dock, api, isGroup = false, fallbackCwd = '',
+  run, status, files = [], changes = [], sandboxCheckouts = [], checkpoints = [], artOpenBtn, artifactStrip, dock, api, isGroup = false, fallbackCwd = '',
 }) {
   artifactStrip.replaceChildren();
   const primaryFiles = (files || []).filter(f => f.available !== false && f.category !== 'byproduct');
@@ -676,7 +676,7 @@ function renderDeliverablePackageZone({
   if (visibleCount > 0 || checkpoints.length > 0) {
     const countNum = primaryFiles.length || sbCount || changes.length || checkpoints.length;
     if (isGroup) {
-      artOpenBtn.innerHTML = `${svgIcon('box', 13)}<span>群成品 ${countNum}</span>`;
+      artOpenBtn.innerHTML = `${svgIcon('box', 13)}<span>群文件 ${countNum}</span>`;
     } else {
       artOpenBtn.textContent = `实时画布 (${countNum})`;
     }
@@ -769,9 +769,11 @@ function renderDeliverablePackageZone({
     const titles = info.lastChild;
     titles.append(
       el('strong', 'deliverable-name', f.name),
-      el('span', 'deliverable-meta', `最终成品 · ${formatDeliverableSize(f.bytes)}${byproductCount > 0 ? ` · 已隐藏 ${byproductCount} 份过程草稿` : ''}`)
+      el('span', 'deliverable-meta', `${taskDeliverables.length ? "任务文件" : "项目文件"} · ${formatDeliverableSize(f.bytes)}${byproductCount > 0 ? ` · 已隐藏 ${byproductCount} 份过程草稿` : ''}`)
     );
 
+    const statusLabel = el('span', 'deliverable-run-status', (STATUS_LABELS[status] || status) + ' · ');
+    titles.querySelector('.deliverable-meta').prepend(statusLabel);
     const actions = el('div', 'deliverable-actions');
     const saveBtn = el('button', 'deliverable-btn is-primary');
     saveBtn.type = 'button';
@@ -807,9 +809,11 @@ function renderDeliverablePackageZone({
     const titles = info.lastChild;
     titles.append(
       el('strong', 'deliverable-name', pkgTitle),
-      el('span', 'deliverable-meta', `直接可用成品包 · 共 ${effectiveDeliverables.length} 个文件（${formatDeliverableSize(totalBytes)}）${byproductCount > 0 ? ` · 已过滤 ${byproductCount} 份过程副产品` : ''}`)
+      el('span', 'deliverable-meta', `${taskDeliverables.length ? "任务文件包" : "项目文件包"} · 共 ${effectiveDeliverables.length} 个文件（${formatDeliverableSize(totalBytes)}）${byproductCount > 0 ? ` · 已过滤 ${byproductCount} 份过程副产品` : ''}`)
     );
 
+    const statusLabel = el('span', 'deliverable-run-status', (STATUS_LABELS[status] || status) + ' · ');
+    titles.querySelector('.deliverable-meta').prepend(statusLabel);
     const actions = el('div', 'deliverable-actions');
     const saveFolderBtn = el('button', 'deliverable-btn is-primary');
     saveFolderBtn.type = 'button';
@@ -1025,6 +1029,10 @@ function createClaudeSoloThreadView(run, {
   };
 
   const update = next => {
+    if (status !== next) {
+      const fileStatus = artifactStrip.querySelector('.deliverable-run-status');
+      if (fileStatus) fileStatus.textContent = (STATUS_LABELS[next] || next) + ' · ';
+    }
     status = next;
     root.dataset.status = status;
     const label = !connected && isActive(status) ? '重连中…' : (STATUS_LABELS[status] || status);
@@ -1207,7 +1215,7 @@ function createClaudeSoloThreadView(run, {
 
   const renderArtifactChips = ({ files = [], changes = [], sandboxCheckouts = [], checkpoints = [] }) => {
     renderDeliverablePackageZone({
-      run, files, changes, sandboxCheckouts, checkpoints, artOpenBtn, artifactStrip, dock, api, isGroup: false, fallbackCwd,
+      run, status, files, changes, sandboxCheckouts, checkpoints, artOpenBtn, artifactStrip, dock, api, isGroup: false, fallbackCwd,
     });
   };
 
@@ -1389,7 +1397,7 @@ function createGrokGroupRoundtableView(run, {
   let whisperCount = 0;
 
   const ensureCollabLog = () => {
-    if (!collabLogDetails || !collabLogDetails.isConnected) {
+    if (!collabLogDetails || !timeline.contains(collabLogDetails)) {
       collabLogDetails = el('details', 'grok-collab-log');
       collabLogSummary = el('summary', 'grok-collab-log-summary', '✦ 成员协作记录');
       collabLogBody = el('div', 'grok-collab-log-body');
@@ -1676,7 +1684,7 @@ function createGrokGroupRoundtableView(run, {
   let turnInterimBubbles = [];
 
   const ensureLiveOwnerBubble = () => {
-    if (liveOwnerStream && liveOwnerStream.block.isConnected) return liveOwnerStream;
+    if (liveOwnerStream && timeline.contains(liveOwnerStream.block)) return liveOwnerStream;
     const block = el('article', 'claude-assistant-turn is-group-lead grok-lead-bubble work-message is-streaming');
     const body = el('div', 'claude-assistant-body');
     block.append(body);
@@ -1705,7 +1713,7 @@ function createGrokGroupRoundtableView(run, {
   };
 
   const foldInterimBubblesIntoCollabLog = finalBlock => {
-    const toFold = turnInterimBubbles.filter(b => b && b !== finalBlock && b.isConnected);
+    const toFold = turnInterimBubbles.filter(b => b && b !== finalBlock && timeline.contains(b));
     turnInterimBubbles = [];
     if (!toFold.length) return;
     const { collabLogDetails: detEl, collabLogSummary: sumEl, collabLogBody: bodyEl } = ensureCollabLog();
@@ -1729,7 +1737,7 @@ function createGrokGroupRoundtableView(run, {
       sealLiveOwnerStream({ isFinal });
       return null;
     }
-    if (liveOwnerStream && liveOwnerStream.block.isConnected) {
+    if (liveOwnerStream && timeline.contains(liveOwnerStream.block)) {
       const cur = liveOwnerStream;
       liveOwnerStream = null;
       if (cur.rafId) cancelAnimationFrame(cur.rafId);
@@ -1743,7 +1751,7 @@ function createGrokGroupRoundtableView(run, {
     }
     // Deduplicate if identical to the last interim bubble just sealed
     const lastInterim = turnInterimBubbles[turnInterimBubbles.length - 1];
-    if (lastInterim && lastInterim.isConnected && lastInterim.textContent.trim() === clean) {
+    if (lastInterim && timeline.contains(lastInterim) && lastInterim.querySelector('.claude-assistant-body')?.textContent.trim() === clean) {
       if (isFinal) {
         turnInterimBubbles.pop();
         if (messageEvent) decorateMessage(lastInterim, messageEvent, { nameOf, onQuote });
@@ -1763,6 +1771,10 @@ function createGrokGroupRoundtableView(run, {
   const appendOwnerTurn = (text, messageEvent, opts) => settleOwnerTurn(text, messageEvent, opts);
 
   const update = next => {
+    if (status !== next) {
+      const fileStatus = artifactStrip.querySelector('.deliverable-run-status');
+      if (fileStatus) fileStatus.textContent = (STATUS_LABELS[next] || next) + ' · ';
+    }
     status = next;
     root.dataset.status = status;
     handoffBtn.hidden = !handoffAvailable;
@@ -1906,7 +1918,7 @@ function createGrokGroupRoundtableView(run, {
 
   const renderArtifactChips = ({ files = [], changes = [], sandboxCheckouts = [], checkpoints = [] }) => {
     renderDeliverablePackageZone({
-      run, files, changes, sandboxCheckouts, checkpoints, artOpenBtn, artifactStrip, dock, api, isGroup: true, fallbackCwd,
+      run, status, files, changes, sandboxCheckouts, checkpoints, artOpenBtn, artifactStrip, dock, api, isGroup: true, fallbackCwd,
     });
   };
 
@@ -2693,6 +2705,39 @@ export function createWorkSessionUi({
     if (stageSyncTimer) { clearTimeout(stageSyncTimer); stageSyncTimer = 0; }
   }
 
+  function syncPlanButton(view, record) {
+    let button = view.root.querySelector('[data-action="approve-work-plan"]');
+    if (record.status !== 'completed' || record.planPhase !== 'ready') {
+      button?.remove();
+      return;
+    }
+    const attempt = String(record.attempt);
+    if (button?.dataset.planAttempt === attempt) return;
+    button?.remove();
+    button = el('button', 'claude-bar-btn is-accent', '按此计划开始');
+    button.type = 'button';
+    button.dataset.action = 'approve-work-plan';
+    button.dataset.planAttempt = attempt;
+    view.root.querySelector('.claude-timeline')?.after(button);
+    button.onclick = async () => {
+      button.disabled = true;
+      const ticket = version;
+      try {
+        const result = await api(`/api/dimension/work/runs/${encodeURIComponent(record.id)}/resume`, {
+          method: 'POST',
+          body: JSON.stringify({text:'按此计划开始', planAttempt:attempt, requestId:`approve-plan:${record.id}:${attempt}`}),
+        });
+        if (ticket === version) merge({runs:[result.run]});
+      } catch (error) {
+        if (ticket === version) {
+          button.disabled = false;
+          showNotice(error.message || '确认失败，请重新查看计划');
+          void refresh();
+        }
+      }
+    };
+  }
+
   function syncStage() {
     cancelPendingStageSync();
     lastStageSyncAt = performance.now();
@@ -2726,6 +2771,7 @@ export function createWorkSessionUi({
 
       // Bind team jobs with live inspector views on group root view
       const rootView = rootViews.get(rootRec.id);
+      if (rootView) syncPlanButton(rootView, rootRec);
       if (rootView && scope.groupId) {
         const assignMap = new Map();
         for (const r of group.runs) {
@@ -3179,7 +3225,10 @@ export function createWorkSessionUi({
 
     const result = await api(endpoint, {
       method: 'POST',
-      body: JSON.stringify({ ...scope, text, quote, deliveryMode, requestId, cursors }),
+      body: JSON.stringify({ ...scope, text, quote, deliveryMode, requestId, cursors,
+        ...(isContinuingFinished && focusedRec.planPhase === 'ready' && !quote &&
+          /^(开始|开始吧|开始做|开始做吧|执行|执行吧|按这个做|按这个方案做|按此计划开始执行|按此计划开始|按计划执行|可以|同意|确认执行)[。！!]?$/u.test(text.trim())
+          ? {planAttempt:String(focusedRec.attempt)} : {}) }),
     });
 
     if (retrySubmission?.id === requestId) retrySubmission = null;

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 cmake_policy(SET CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-project(DimensionAgentNative VERSION 0.7.26 LANGUAGES CXX)
+project(DimensionAgentNative VERSION 0.7.27 LANGUAGES CXX)
 # Some localized MSVC installations report a UTF-8 include prefix that
 # CMake decodes using the console code page during compiler detection.
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND CMAKE_CL_SHOWINCLUDES_PREFIX MATCHES "^娉")

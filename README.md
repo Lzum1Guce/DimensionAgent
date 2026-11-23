@@ -2,7 +2,7 @@
 
 DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可以和一个角色聊日常，让八位角色同台讨论，也可以打开 Work 工坊，让她们在你的项目里读代码、修改文件、跑测试。
 
-[下载 Windows x64 安装包](https://github.com/Lzum1Guce/DimensionAgent/releases/download/v0.7.26/DimensionAgent-0.7.26-Windows-x64-Setup.exe) · [查看发布说明与校验文件](https://github.com/Lzum1Guce/DimensionAgent/releases/latest)
+[下载 Windows x64 安装包](https://github.com/Lzum1Guce/DimensionAgent/releases/download/v0.7.27/DimensionAgent-0.7.27-Windows-x64-Setup.exe) · [查看发布说明与校验文件](https://github.com/Lzum1Guce/DimensionAgent/releases/latest)
 
 ## Chat · 和八位角色一起聊天
 
@@ -16,6 +16,10 @@ DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可�
 
 ## Work · 把项目交给角色协作
 
+你可以先说“我想做个星露谷插件”，再和角色商量具体玩法。需求清楚后，Work 会先给出计划。单聊会写明拟定方案和执行任务的模型；群聊会列出各成员的职责、引擎和模型。点击 **按此计划开始** 或回复“执行”，角色才开始查看工作区、调用工具或派单。改动方案后需要重新确认。
+
+退出再打开会话可以继续查看待确认方案。已确认的路线不可用时，客户端会提示重新选择；CLI 使用账号默认且无法识别型号时，方案会明确说明。以“直接做，不用先出计划：”开头可跳过本次规划。
+
 选择一个本地项目目录，就能在 Windows 原生工位里给角色派活。可以从一个只读任务开始：
 
 > 帮我找出项目的启动入口和测试命令，告诉我它们分别在哪个文件里，先不要改代码。
@@ -26,7 +30,7 @@ DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可�
 
 ## 第一次使用
 
-1. 在 Windows 10/11 x64 上安装客户端。缺少 WebView2 的电脑首次安装需要联网。当前 v0.7.26 安装包未签名，Windows 可能显示 SmartScreen 提示。
+1. 在 Windows 10/11 x64 上安装客户端。缺少 WebView2 的电脑首次安装需要联网。当前 v0.7.27 安装包未签名，Windows 可能显示 SmartScreen 提示。
 2. 从开始菜单打开 DimensionAgent，在模型设置中填写自己的服务地址、模型名和密钥。选一个角色发出第一条消息，或进入「AI 娘茶话会」开始群聊。
 3. 需要编程协作时，再选择项目目录和 Work 工位。外部 CLI、GitHub、WSL 沙盒和语音服务按需配置。
 

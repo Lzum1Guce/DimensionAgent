@@ -12,10 +12,15 @@
 #include <memory>
 #include <optional>
 #include <stop_token>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace dimension {
+
+struct WorkRouteUnavailable : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 struct RunExecutionContext {
     std::string run_id;
@@ -86,6 +91,8 @@ struct RunCallbacks {
     std::function<bool(std::string_view)> interrupt_tool_on_steer;
     // Optional attempt-frozen plan. Only explicitly configured higher routes
     // may follow the initial route. No tool calls are retried by escalation.
+    std::function<Json(const RunExecutionContext&, const ModelRoute&, const std::vector<ModelMessage>&,
+                       const std::string&, std::stop_token)> propose_routes;
     std::function<std::vector<ModelRoute>(const RunExecutionContext&)> model_routes;
     // Opt-in Work-only projection. The service preserves original messages and
     // receipts, commits summaries only for the current input revision, and
@@ -158,7 +165,7 @@ public:
     // steers a running/queued task in the lane; queue=true creates a later task.
     RunSubmission submit(const std::string& bot_id, const std::string& group_id,
                          const std::string& text, const std::string& request_id,
-                         bool queue = false, Json input_context = {}, Json assigned_route = {});
+                         bool queue = false, Json input_context = {}, Json assigned_route = {}, bool plan_first = false);
     RunSubmission steer(const std::string& run_id, const std::string& text,
                         const std::string& request_id, Json input_context = {});
     Json cancel(const std::string& run_id);
@@ -172,7 +179,7 @@ public:
     // Terminal runs become a new attempt. Inputs, context and tool receipts stay.
     // An old callback must first have returned; otherwise resume rejects.
     RunSubmission resume(const std::string& run_id, const std::string& request_id,
-                         const std::string& text = {}, Json input_context = {});
+                         const std::string& text = {}, Json input_context = {}, unsigned plan_attempt = 0, bool user_work = false);
 
     bool wait_until_terminal(const std::string& run_id, std::chrono::milliseconds timeout, std::stop_token stop) const;
     std::string cli_input(const std::string& run_id, std::size_t count) const;
