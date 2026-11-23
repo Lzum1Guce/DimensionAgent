@@ -1,8 +1,36 @@
 # DimensionAgent
 
-DimensionAgent 是 Windows x64 桌面角色聊天与协作工具。Chat 支持单聊、群聊和立绘剧场，Work 支持个人任务、多角色分工和本机 CLI。源码快照版本为 **0.7.26**。
+DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可以和一个角色聊日常，让八位角色同台讨论，也可以打开 Work 工坊，让她们在你的项目里读代码、修改文件、跑测试。
 
-首次启动会在本机创建 DeepSeek、GPT、Claude、GLM、Grok、Gemini、Kimi、Qwen 八位角色，以及空的「AI 娘茶话会」。角色人设位于 `include/dimension/default_roster.hpp`。配置自己的模型服务后即可开始对话。外部 CLI、GitHub、WSL 沙盒及 Breeze 语音按需在使用者电脑上配置。
+[下载 Windows x64 安装包](https://github.com/Lzum1Guce/DimensionAgent/releases/download/v0.7.26/DimensionAgent-0.7.26-Windows-x64-Setup.exe) · [查看发布说明与校验文件](https://github.com/Lzum1Guce/DimensionAgent/releases/latest)
+
+## Chat · 和八位角色一起聊天
+
+首次打开会看到 **DeepSeek、GPT、Claude、GLM、Grok、Gemini、Kimi、Qwen**，以及一个空的「AI 娘茶话会」。每位角色都有自己的人设、说话风格和立绘。实际生成回复的模型由你配置，同一个模型也可以扮演不同角色。
+
+单聊时，可以切到沉浸模式，跟着立绘和对白框逐句阅读。群聊时，可以让几位角色各自出主意，再把想法整理成共同的决定。第一次试用，可以在茶话会发一句：
+
+> 周末去露营，每个人只能带一样东西。你们各带什么？最后一起列一份清单。
+
+角色记忆让对话可以接续之前的话题。想听角色说话时，可以再连接自己的 Breeze 语音服务。[查看内置角色设定](include/dimension/default_roster.hpp)
+
+## Work · 把项目交给角色协作
+
+选择一个本地项目目录，就能在 Windows 原生工位里给角色派活。可以从一个只读任务开始：
+
+> 帮我找出项目的启动入口和测试命令，告诉我它们分别在哪个文件里，先不要改代码。
+
+- **单人工作**：让一个角色读取项目、编辑文件或运行命令，在客户端查看进度和改动。
+- **群聊分工**：让一位成员排查启动问题，另一位检查测试覆盖。群主会先汇报职责、模型和选择理由，再派发任务。模型池由你勾选，可以包含 API 模型和本机 CLI 型号。
+- **CLI 与 GitHub**：已安装并登录的 Kimi Code、DeepSeek Harness、Codex、Claude Code 等可以参与执行。在「扩展中枢 → GitHub 连接」确认账号和仓库权限后，可以让成员查 Issue、创建 PR 或核对 CI。
+
+## 第一次使用
+
+1. 在 Windows 10/11 x64 上安装客户端。缺少 WebView2 的电脑首次安装需要联网。当前 v0.7.26 安装包未签名，Windows 可能显示 SmartScreen 提示。
+2. 从开始菜单打开 DimensionAgent，在模型设置中填写自己的服务地址、模型名和密钥。选一个角色发出第一条消息，或进入「AI 娘茶话会」开始群聊。
+3. 需要编程协作时，再选择项目目录和 Work 工位。外部 CLI、GitHub、WSL 沙盒和语音服务按需配置。
+
+新安装从空白聊天记录开始。模型调用使用你自己的账号和配额，安装包不含开发者的密钥、聊天记录或个人工作区。
 
 ## 在 Windows 上从源码运行
 
