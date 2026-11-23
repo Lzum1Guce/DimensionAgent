@@ -1,0 +1,135 @@
+/* DimensionBot 默认动态头像 —— 配合 dimension-bot-avatar.js
+   造型：整颗撑满头像框的纯净圆球 + 只有眼睛 + 球顶探出的物理 Q 弹小草芽呆毛。 */
+.dimension-bot {
+  --dbot-color: #2A2723;
+  --dbot-ink: #1f1a17;
+  --dbot-sprout: #6FBF5B;
+  --dbot-sprout-deep: #4A923A;
+  --dbot-sprout-vein: rgba(255, 255, 255, 0.45);
+  display: inline-flex;
+  position: relative;
+  flex-shrink: 0;
+  overflow: visible;
+  isolation: isolate;
+  contain: layout;
+}
+.dimension-bot .dbot-svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.dimension-bot .dbot-svg * { transform-box: view-box; }
+
+/* 撑满圆框的整颗圆球主体与柔和顶部高光 */
+.dbot-body { fill: var(--dbot-color); }
+.dbot-shine { fill: #fff; opacity: 0.18; }
+
+/* 球顶探出的小草芽呆毛 */
+.dbot-sprout-stem {
+  fill: none;
+  stroke: var(--dbot-sprout-deep);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.dbot-leaf {
+  fill: var(--dbot-sprout);
+  stroke: var(--dbot-sprout-deep);
+  stroke-width: 1.05;
+  stroke-linejoin: round;
+  transform-origin: 0px 0px;
+}
+.dbot-leaf.is-right {
+  fill: color-mix(in srgb, var(--dbot-sprout) 84%, #a6e37a);
+}
+.dbot-leaf-vein {
+  fill: none;
+  stroke: var(--dbot-sprout-vein);
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+
+/* 只有眼睛，大而干净灵动 */
+.dbot-sclera { fill: #fff; }
+.dbot-pupil { fill: var(--dbot-ink); }
+.dbot-glint { fill: #fff; }
+
+.dbot-float { transform-origin: 50px 98px; }
+.dbot-squash { transform-origin: 50px 98px; }
+
+/* 浅色印章（牙白等）：给圆球与眼白加清晰柔和描边 */
+.dimension-bot.is-light .dbot-body { stroke: #2a2723; stroke-opacity: 0.34; stroke-width: 2; }
+.dimension-bot.is-light .dbot-sclera { stroke: #2a2723; stroke-opacity: 0.28; stroke-width: 1.1; }
+.dimension-bot.is-light .dbot-shine { opacity: 0; }
+
+/* 夜墨主题：给深色圆球一圈柔光描边，小草芽略提亮保持清新 */
+html[data-theme="nightink"] .dimension-bot {
+  --dbot-sprout: #82D46C;
+  --dbot-sprout-deep: #58A846;
+}
+html[data-theme="nightink"] .dimension-bot:not(.is-light) .dbot-body { stroke: rgb(255 255 255 / 0.18); stroke-width: 1.8; }
+
+/* 极小尺寸（如输入框旁的思考小球）：精简叶脉与小高光，保持轮廓清晰 */
+.dimension-bot.is-tiny .dbot-leaf-vein,
+.dimension-bot.is-tiny .dbot-shine,
+.dimension-bot.is-tiny .dbot-glint.is-small { display: none; }
+.dimension-bot.is-tiny .dbot-sprout-stem { stroke-width: 4; }
+
+/* ───────── 待机：轻微呼吸起伏 · 自然眨眼 · 偶尔东张西望 ───────── */
+.dimension-bot .dbot-float { animation: dbotFloat 3.6s ease-in-out infinite; animation-delay: var(--dbot-phase, 0s); }
+.dimension-bot .dbot-squash { animation: dbotSquash 3.6s ease-in-out infinite; animation-delay: var(--dbot-phase, 0s); }
+.dimension-bot .dbot-eye { animation: dbotBlink 5.2s linear infinite; animation-delay: var(--dbot-phase, 0s); }
+.dimension-bot .dbot-pupils { animation: dbotLook 11s ease-in-out infinite; animation-delay: var(--dbot-phase, 0s); }
+
+@keyframes dbotFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2.2px); }
+}
+@keyframes dbotSquash {
+  0%, 100% { transform: scale(1.02, 0.98); }
+  50% { transform: scale(0.99, 1.012); }
+}
+@keyframes dbotBlink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  92% { transform: scaleY(0.08); }
+  94% { transform: scaleY(1); }
+  96% { transform: scaleY(0.12); }
+  97.5% { transform: scaleY(1); }
+}
+@keyframes dbotLook {
+  0%, 26%, 100% { transform: translate(0, 0); }
+  32%, 48% { transform: translate(-2.2px, 0.5px); }
+  56%, 72% { transform: translate(2.2px, -0.6px); }
+  80% { transform: translate(0, 0); }
+}
+
+/* 悬停：开心地蹦一下（配合 JS 物理给草芽施加惯性冲量） */
+:is(button, a, .bot-item, .pinned-item, .seal-slot):hover > .dimension-bot.is-idle .dbot-float,
+:is(button, a, .bot-item, .pinned-item):hover .seal-slot > .dimension-bot.is-idle .dbot-float,
+.dimension-bot.is-idle:hover .dbot-float { animation: dbotHop 0.62s cubic-bezier(0.3, 1.5, 0.5, 1) 1; }
+@keyframes dbotHop {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-5.5px); }
+  70% { transform: translateY(0.8px); }
+}
+
+/* ───────── 思考中：抬眼望向一侧 · 呼吸加快 ───────── */
+.dimension-bot.is-thinking .dbot-pupils { animation: none; transform: translate(2.1px, -2.6px); }
+.dimension-bot.is-thinking .dbot-float { animation-duration: 2.1s; }
+.dimension-bot.is-thinking .dbot-squash { animation-duration: 2.1s; }
+
+/* 窗口隐藏或关闭动效时暂停 */
+html.dbot-paused .dimension-bot *,
+html[data-motion="off"] .dimension-bot * { animation-play-state: paused !important; }
+html[data-motion="off"] .dimension-bot * { animation: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dimension-bot *,
+  .dimension-bot.is-thinking * { animation: none !important; }
+}
+
+/* 有真实头像图片时的容器 */
+.dbot-img { display: inline-flex; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: var(--color-inset, #efe9df); }
+.dbot-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.dbot-img.is-thinking { animation: dbotImgPulse 1.2s ease-in-out infinite; }
+@keyframes dbotImgPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent, #d97757) 40%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent, #d97757) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) { .dbot-img.is-thinking { animation: none; } }
