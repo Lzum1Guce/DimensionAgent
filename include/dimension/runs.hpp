@@ -49,6 +49,15 @@ using RunModelCaller = std::function<ModelReply(
     const ModelConfig&, const std::vector<ModelMessage>&,
     const std::vector<ModelTool>&, ModelChunk, std::stop_token)>;
 
+struct BlueprintRunResult {
+    bool ok = false;
+    bool cancelled = false;
+    std::string response;
+    std::string error;
+    std::vector<std::string> artifacts;
+    bool needs_decision = false;
+};
+
 struct RunCallbacks {
     RunModelCaller model; // Empty selects dimension::call_model.
     // Called only after a new event is durably committed. Loading old runs never
@@ -65,6 +74,7 @@ struct RunCallbacks {
     std::function<ToolExecution(const ToolCall&, const RunExecutionContext&,
                                 std::stop_token, std::stop_token)> authorize_and_execute_tool;
     std::function<std::string(const RunExecutionContext&)> system_prompt;
+    std::function<std::string(const RunExecutionContext&)> discussion_prompt;
     std::function<std::string(const RunExecutionContext&)> memory;
     // Optional native multi-turn conversation history injected before the new user input
     // when starting a fresh Chat run, avoiding flat-text transcript stuffing.
@@ -94,6 +104,9 @@ struct RunCallbacks {
     std::function<Json(const RunExecutionContext&, const ModelRoute&, const std::vector<ModelMessage>&,
                        const std::string&, std::stop_token)> propose_routes;
     std::function<std::vector<ModelRoute>(const RunExecutionContext&)> model_routes;
+    // Optional DimensionImage blueprint executor for group/solo blueprint runs.
+    std::function<bool(const std::string&)> has_locked_assignment;
+    std::function<BlueprintRunResult(const RunExecutionContext&, const Json&, std::stop_token)> execute_blueprint;
     // Opt-in Work-only projection. The service preserves original messages and
     // receipts, commits summaries only for the current input revision, and
     // never invokes tools while summarizing. No callback means legacy behavior.
@@ -180,10 +193,16 @@ public:
     // An old callback must first have returned; otherwise resume rejects.
     RunSubmission resume(const std::string& run_id, const std::string& request_id,
                          const std::string& text = {}, Json input_context = {}, unsigned plan_attempt = 0, bool user_work = false);
+    // Persists blueprint metadata onto a run's routePlan without altering scheduling state.
+    Json bind_blueprint(const std::string& run_id, Json blueprint_meta);
+    // Resumes a terminal run and executes the specified DimensionImage blueprint as the single source of truth.
+    RunSubmission resume_blueprint(const std::string& run_id, const std::string& request_id,
+                                   const std::string& canvas_id, const std::string& text = {});
 
     bool wait_until_terminal(const std::string& run_id, std::chrono::milliseconds timeout, std::stop_token stop) const;
     std::string cli_input(const std::string& run_id, std::size_t count) const;
     std::vector<std::string> input_texts(const std::string& run_id) const;
+    Json verified_outputs(const std::string& run_id) const;
     Json brief_json(const std::string& run_id) const;
     Json get(const std::string& run_id) const;
     // Last measured Work projection or provider-reported Chat input usage.

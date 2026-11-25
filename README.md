@@ -2,7 +2,7 @@
 
 DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可以和一个角色聊日常，让八位角色同台讨论，也可以打开 Work 工坊，让她们在你的项目里读代码、修改文件、跑测试。
 
-[下载 Windows x64 安装包](https://github.com/Lzum1Guce/DimensionAgent/releases/download/v0.7.27/DimensionAgent-0.7.27-Windows-x64-Setup.exe) · [查看发布说明与校验文件](https://github.com/Lzum1Guce/DimensionAgent/releases/latest)
+[下载 Windows x64 安装包](https://github.com/Lzum1Guce/DimensionAgent/releases/download/v0.7.28/DimensionAgent-0.7.28-Windows-x64-Setup.exe) · [查看发布说明与校验文件](https://github.com/Lzum1Guce/DimensionAgent/releases/latest)
 
 ## Chat · 和八位角色一起聊天
 
@@ -15,6 +15,11 @@ DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可�
 角色记忆让对话可以接续之前的话题。想听角色说话时，可以再连接自己的 Breeze 语音服务。[查看内置角色设定](include/dimension/default_roster.hpp)
 
 ## Work · 把项目交给角色协作
+
+Work 群聊现在默认由群主拟计划、分配成员并审查交付。确认前可以只调整一个节点，或选择「我来分配」。手动更换成员或执行组合会锁定该节点。群主按验收条件检查成员回执，退回时保留已有输出，等待用户决定。重新确认将重跑整张蓝图。
+
+模型池支持按 CLI、模型专长和相对成本选择执行组合。节点记录开工时指定的路线、执行器回报及耗时。首次使用保留八位内置角色，由用户配置自己的模型服务或 CLI 登录。
+
 
 你可以先说“我想做个星露谷插件”，再和角色商量具体玩法。需求清楚后，Work 会先给出计划。单聊会写明拟定方案和执行任务的模型；群聊会列出各成员的职责、引擎和模型。点击 **按此计划开始** 或回复“执行”，角色才开始查看工作区、调用工具或派单。改动方案后需要重新确认。
 
@@ -30,7 +35,7 @@ DimensionAgent 是一款 Windows 桌面 AI 角色聊天与协作软件。你可�
 
 ## 第一次使用
 
-1. 在 Windows 10/11 x64 上安装客户端。缺少 WebView2 的电脑首次安装需要联网。当前 v0.7.27 安装包未签名，Windows 可能显示 SmartScreen 提示。
+1. 在 Windows 10/11 x64 上安装客户端。缺少 WebView2 的电脑首次安装需要联网。当前 v0.7.28 安装包未签名，Windows 可能显示 SmartScreen 提示。
 2. 从开始菜单打开 DimensionAgent，在模型设置中填写自己的服务地址、模型名和密钥。选一个角色发出第一条消息，或进入「AI 娘茶话会」开始群聊。
 3. 需要编程协作时，再选择项目目录和 Work 工位。外部 CLI、GitHub、WSL 沙盒和语音服务按需配置。
 

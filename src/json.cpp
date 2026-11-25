@@ -1,4 +1,5 @@
 #include "dimension/json.hpp"
+#include <algorithm>
 
 #include <charconv>
 #include <cmath>

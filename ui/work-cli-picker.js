@@ -4,6 +4,7 @@ const FAVORITES_STORAGE_KEY = 'dimension.workCliPicker.favorites.v1';
 
 const HARNESS_CATALOG = [
   { id: 'auto', label: '自动调度', shortLabel: '自动', selectableModels: true },
+  { id: 'antigravity', label: 'Antigravity (agy)', shortLabel: 'Antigravity', selectableModels: true },
   { id: 'hermes', label: 'Hermes', shortLabel: 'Hermes', selectableModels: true },
   { id: 'deepseek-harness', label: 'DeepSeek Harness', shortLabel: 'DeepSeek', selectableModels: true },
   { id: 'kimi-code', label: 'Kimi Code', shortLabel: 'Kimi Code', selectableModels: true },
@@ -19,6 +20,10 @@ const EFFORT_CYCLE = ['', 'low', 'medium', 'high'];
 
 // Fallback install guidance for engines the backend did not describe.
 const INSTALL_GUIDE = {
+  antigravity: {
+    command: 'irm https://antigravity.google/cli/install.ps1 | iex',
+    note: '在 PowerShell 运行上方官方命令安装 agy，并在终端执行一次 agy 完成登录即可。',
+  },
   'claude-code': { command: 'npm install -g @anthropic-ai/claude-code' },
   codex: { command: 'npm install -g @openai/codex' },
   opencode: { command: 'npm install -g opencode-ai' },
@@ -183,11 +188,37 @@ export function createWorkCliPicker(opts = {}) {
 
   let favorites = readFavorites();
   let focusedEngineId = ''; // Left rail highlighted engine
+  let leadPaneSource = '';  // '' (follow saved) | 'api' | 'cli'
   let searchQuery = '';
   let refreshing = false;
 
   const getSettings = () => opts.getSettings?.() || {};
   const getProviderGroups = () => opts.getProviderGroups?.() || [];
+
+  const getWorkLeadConfig = settings => {
+    const wl = settings?.workLead && typeof settings.workLead === 'object' ? settings.workLead : {};
+    const isCli = wl.mode === 'cli' && wl.engineId && wl.engineId !== 'auto' && wl.engineId !== 'builtin';
+    return {
+      mode: isCli ? 'cli' : 'api',
+      engineId: isCli ? String(wl.engineId) : '',
+      providerId: isCli ? String(wl.providerId || '') : '',
+      model: isCli ? String(wl.model || '') : '',
+      reasoningEffort: isCli ? String(wl.reasoningEffort || '') : '',
+    };
+  };
+
+  const formatWorkLeadSummary = (settings, harnesses) => {
+    const wl = getWorkLeadConfig(settings);
+    if (wl.mode === 'cli') {
+      const meta = HARNESS_CATALOG.find(x => x.id === wl.engineId);
+      const desc = (harnesses || []).find(h => h.id === wl.engineId);
+      const engLabel = meta ? meta.shortLabel : wl.engineId;
+      const mLabel = prettifyModelShort(wl.model || desc?.nativeDefaultModel || '');
+      return mLabel ? `${engLabel} · ${mLabel}` : `${engLabel} · 原生订阅`;
+    }
+    const lead = opts.getLeadSelection?.();
+    return prettifyModelShort(lead?.model || '');
+  };
 
   const getEngineConfig = (settings, engineId) => {
     const map = settings.cliEngineConfigs && typeof settings.cliEngineConfigs === 'object'
@@ -235,6 +266,7 @@ export function createWorkCliPicker(opts = {}) {
   const openPopover = () => {
     const settings = getSettings();
     focusedEngineId = settings.cliEngine || 'auto';
+    leadPaneSource = '';
     searchQuery = '';
     searchInput.value = '';
     renderSplitView();
@@ -246,6 +278,19 @@ export function createWorkCliPicker(opts = {}) {
       placePopover();
       searchInput.focus({ preventScroll: true });
     });
+    if ((!Array.isArray(settings.harnesses) || !settings.harnesses.length) && !refreshing && opts.onRefresh) {
+      refreshing = true;
+      refreshBtn.disabled = true;
+      Promise.resolve(opts.onRefresh({ silent: true })).finally(() => {
+        refreshing = false;
+        refreshBtn.disabled = false;
+        syncTriggerSummary();
+        if (!popover.hidden) {
+          renderSplitView();
+          placePopover();
+        }
+      });
+    }
   };
 
   const togglePopover = () => {
@@ -267,10 +312,16 @@ export function createWorkCliPicker(opts = {}) {
     const targetDesc = harnesses.find(h => h.id === (activeEng === 'auto' ? autoTargetId : activeEng));
 
     if (activeEng === 'builtin') {
-      const lead = opts.getLeadSelection?.();
-      const leadShort = prettifyModelShort(lead?.model || '');
-      triggerLabel.textContent = leadShort ? `内置轻量 · ${leadShort}` : '内置轻量';
-      effortQuickBtn.hidden = true;
+      const leadSummary = formatWorkLeadSummary(settings, harnesses);
+      triggerLabel.textContent = leadSummary ? `内置轻量 · ${leadSummary}` : '内置轻量';
+      const wl = getWorkLeadConfig(settings);
+      if (wl.mode === 'cli') {
+        effortQuickBtn.hidden = false;
+        effortQuickBtn.textContent = EFFORT_LABEL[wl.reasoningEffort] || 'Auto';
+        effortQuickBtn.dataset.effort = wl.reasoningEffort || 'auto';
+      } else {
+        effortQuickBtn.hidden = true;
+      }
       return;
     }
 
@@ -292,7 +343,13 @@ export function createWorkCliPicker(opts = {}) {
     } else if (cfg.model) {
       subLabel = prettifyModelShort(cfg.model);
     }
-    triggerLabel.textContent = subLabel ? `${baseName} · ${subLabel}` : baseName;
+    const workerLabel = subLabel ? `${baseName} · ${subLabel}` : baseName;
+    const leadSummary = opts.onSelectLeadModel ? formatWorkLeadSummary(settings, harnesses) : '';
+    const leadCompact = leadSummary ? leadSummary.split(' · ')[0] : '';
+    triggerLabel.textContent = leadCompact ? `${leadCompact} → ${workerLabel}` : workerLabel;
+    triggerBtn.title = leadSummary
+      ? `接待指挥（谈需求/验收）：${leadSummary} → 实干执行 CLI：${workerLabel}`
+      : `实干执行 CLI：${workerLabel}`;
 
     const eff = cfg.reasoningEffort || '';
     effortQuickBtn.hidden = false;
@@ -374,8 +431,23 @@ export function createWorkCliPicker(opts = {}) {
     title.textContent = `这位伙伴还没来到工坊：${engineItem.label}`;
     const desc = document.createElement('div');
     desc.className = 'hcp-install-desc';
-    desc.textContent = '本机未检测到该引擎，暂时无法接取委托。安装后点击下方「刷新列表」即可切换使用。';
+    const canSandboxInstall = Boolean(opts.onOpenCliSandboxSettings) && descriptor?.sandboxInstallable !== false;
+    desc.textContent = canSandboxInstall
+      ? '推荐直接在设置中一键下载到隔离沙盒（Bubblewrap），仅可见当前项目目录、免污染宿主机。'
+      : '请在本机终端运行下方官方安装命令并完成一次登录，随后点击「刷新列表」即可自动接入。';
     card.append(title, desc);
+    if (canSandboxInstall) {
+      const goBtn = document.createElement('button');
+      goBtn.type = 'button';
+      goBtn.className = 'cs-cli-btn is-primary hcp-go-sandbox-btn';
+      goBtn.textContent = `前往设置下载 ${engineItem.label} 到沙盒`;
+      goBtn.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closePopover();
+        opts.onOpenCliSandboxSettings();
+      });
+      card.append(goBtn);
+    }
     const hint = String(descriptor?.installHint || descriptor?.installCommand || INSTALL_GUIDE[engineItem.id]?.command || '').trim();
     if (hint) {
       const code = document.createElement('code');
@@ -408,16 +480,163 @@ export function createWorkCliPicker(opts = {}) {
 
     const activeEng = settings.cliEngine || 'auto';
 
-    // Role Lead / Built-in lightweight model picker (unified here so bottom bar needs zero duplicate model dropdown!)
+    // Role Lead / Built-in lightweight model picker (supports both Dimension API & local installed Code CLIs!)
     if (engineItem.id === '__lead__' || engineItem.id === 'builtin') {
       const leadSel = opts.getLeadSelection?.() || {};
+      const wl = getWorkLeadConfig(settings);
+      const effectiveLeadSrc = leadPaneSource || wl.mode;
+      const showCliMode = effectiveLeadSrc === 'cli';
+
       const statusBox = document.createElement('div');
       statusBox.className = 'hcp-right-status';
       statusBox.innerHTML = `<span class="hcp-status-dot is-ready"></span><span class="hcp-status-text"></span>`;
       statusBox.lastElementChild.textContent = engineItem.id === '__lead__'
-        ? '负责接单对话、统筹拆解与汇报总结'
-        : '不调外部引擎，直接由以下模型完成任务';
-      rightHeader.append(statusBox);
+        ? (showCliMode ? '接待谈需求并指挥实干 CLI · 本机 CLI' : '负责谈需求、派单给 CLI 实干并验收')
+        : '直接由下方模型执行（不使用 CLI）';
+
+      const leadSwitch = document.createElement('div');
+      leadSwitch.className = 'hcp-source-seg';
+      const btnLeadApi = document.createElement('button');
+      btnLeadApi.type = 'button';
+      btnLeadApi.className = `hcp-source-pill${!showCliMode ? ' is-active' : ''}`;
+      btnLeadApi.textContent = '维度 API';
+      btnLeadApi.onclick = ev => {
+        ev.stopPropagation();
+        leadPaneSource = 'api';
+        renderSplitView();
+      };
+      const btnLeadCli = document.createElement('button');
+      btnLeadCli.type = 'button';
+      btnLeadCli.className = `hcp-source-pill${showCliMode ? ' is-active' : ''}`;
+      btnLeadCli.textContent = '本机 Code CLI';
+      btnLeadCli.onclick = ev => {
+        ev.stopPropagation();
+        leadPaneSource = 'cli';
+        renderSplitView();
+      };
+      leadSwitch.append(btnLeadApi, btnLeadCli);
+      if (typeof opts.onOpenCliReceptionModal === 'function') {
+        const btnLeadSettings = document.createElement('button');
+        btnLeadSettings.type = 'button';
+        btnLeadSettings.className = 'hcp-lead-settings-btn';
+        btnLeadSettings.title = '查看全部可用本机 CLI 模型并统一设置接待模型';
+        btnLeadSettings.innerHTML = `${svgGear()}<span>设置</span>`;
+        btnLeadSettings.onclick = ev => {
+          ev.stopPropagation();
+          closePopover();
+          opts.onOpenCliReceptionModal();
+        };
+        rightHeader.append(statusBox, leadSwitch, btnLeadSettings);
+      } else {
+        rightHeader.append(statusBox, leadSwitch);
+      }
+
+      if (showCliMode) {
+        const cliEngines = HARNESS_CATALOG.filter(x => x.id !== 'auto' && x.id !== 'builtin');
+        const installedClis = cliEngines.filter(it => harnesses.find(h => h.id === it.id)?.installed);
+        const missingClis = cliEngines.filter(it => !harnesses.find(h => h.id === it.id)?.installed);
+        let renderedCount = 0;
+
+        for (const cliItem of installedClis) {
+          const desc = harnesses.find(h => h.id === cliItem.id);
+          const defModel = desc?.nativeDefaultModel || '';
+          const nativeGroups = Array.isArray(desc?.nativeModelGroups) ? desc.nativeModelGroups : [];
+          const engineMatch = !queryLower || cliItem.label.toLowerCase().includes(queryLower) || cliItem.id.toLowerCase().includes(queryLower);
+
+          const matchedEntries = [];
+          if (engineMatch || '默认原生订阅 default auto'.includes(queryLower) || defModel.toLowerCase().includes(queryLower)) {
+            matchedEntries.push({
+              isDefault: true,
+              providerArg: '',
+              modelId: '',
+              displayName: defModel ? `默认订阅（${prettifyModelShort(defModel)}）` : '默认原生订阅模型',
+              tooltip: `${cliItem.label} · 使用本机官方 CLI 默认登录配置`,
+            });
+          }
+          const seenModels = new Set();
+          for (const grp of nativeGroups) {
+            const provArg = String(grp.providerArg || '').trim();
+            for (const m of (grp.models || [])) {
+              const mid = String(m || '').trim();
+              if (!mid) continue;
+              const dedupKey = `${provArg}:${mid}`;
+              if (seenModels.has(dedupKey)) continue;
+              if (!engineMatch && !mid.toLowerCase().includes(queryLower) && !String(grp.title || grp.groupTitle || '').toLowerCase().includes(queryLower)) {
+                continue;
+              }
+              seenModels.add(dedupKey);
+              matchedEntries.push({
+                isDefault: false,
+                providerArg: provArg,
+                modelId: mid,
+                displayName: prettifyModelShort(mid),
+                tooltip: `${cliItem.label} / ${provArg ? `${provArg} / ` : ''}${mid}`,
+              });
+            }
+          }
+          if (!matchedEntries.length) continue;
+          renderedCount += matchedEntries.length;
+
+          const hdr = document.createElement('div');
+          hdr.className = 'hcp-provider-header';
+          hdr.textContent = `${cliItem.label.toUpperCase()} · 原生订阅`;
+          rightList.append(hdr);
+
+          for (const entry of matchedEntries) {
+            const isCur = wl.mode === 'cli' && wl.engineId === cliItem.id &&
+              (entry.isDefault ? !wl.model : (wl.model === entry.modelId && (!entry.providerArg || wl.providerId === entry.providerArg)));
+            const selectLeadCli = nextEffort => {
+              const payload = {
+                workLead: {
+                  mode: 'cli',
+                  engineId: cliItem.id,
+                  providerId: entry.providerArg,
+                  model: entry.modelId,
+                  reasoningEffort: nextEffort ?? (isCur ? wl.reasoningEffort : ''),
+                },
+              };
+              if (engineItem.id === 'builtin' && activeEng !== 'builtin') {
+                payload.cliEngine = 'builtin';
+              }
+              leadPaneSource = 'cli';
+              emitChange(payload);
+            };
+            rightList.append(renderModelItemRow({
+              favKey: entry.isDefault ? '' : `lead-cli:${cliItem.id}:${entry.providerArg}:${entry.modelId}`,
+              displayName: entry.displayName,
+              tooltip: entry.tooltip,
+              isSelected: isCur,
+              effortValue: isCur ? wl.reasoningEffort : '',
+              onSelect: () => {
+                selectLeadCli();
+                closePopover();
+              },
+              onCycleEffort: () => {
+                const curIdx = EFFORT_CYCLE.indexOf(isCur ? (wl.reasoningEffort || '') : '');
+                const nextEff = EFFORT_CYCLE[(curIdx + 1) % EFFORT_CYCLE.length];
+                selectLeadCli(nextEff);
+              },
+            }));
+          }
+        }
+
+        if (!renderedCount) {
+          const empty = document.createElement('div');
+          empty.className = 'hcp-empty-card';
+          empty.textContent = installedClis.length
+            ? '没有匹配的本机 Code CLI 模型'
+            : '本机尚未探测到已安装的官方 Code CLI，可先安装 Claude Code / Codex / Kimi Code / Hermes 等，或切回「维度 API」。';
+          rightList.append(empty);
+        } else if (missingClis.length && !queryLower) {
+          const note = document.createElement('div');
+          note.className = 'hcp-empty-card';
+          note.style.marginTop = '8px';
+          note.style.padding = '8px 10px';
+          note.textContent = `未安装引擎：${missingClis.map(x => x.label).join('、')}（安装后点击下方「刷新列表」即可选用）`;
+          rightList.append(note);
+        }
+        return;
+      }
 
       const providerGroups = getProviderGroups();
       let count = 0;
@@ -434,7 +653,7 @@ export function createWorkCliPicker(opts = {}) {
         hdr.textContent = provTitle;
         rightList.append(hdr);
         for (const modelId of models) {
-          const isCur = leadSel.providerId === provId && leadSel.model === modelId;
+          const isCur = wl.mode === 'api' && leadSel.providerId === provId && leadSel.model === modelId;
           rightList.append(renderModelItemRow({
             favKey: `model:${provId}:${modelId}`,
             displayName: prettifyModelShort(modelId),
@@ -442,9 +661,11 @@ export function createWorkCliPicker(opts = {}) {
             isSelected: isCur,
             effortValue: '',
             onSelect: () => {
-              if (engineItem.id === 'builtin' && activeEng !== 'builtin') {
-                emitChange({ cliEngine: 'builtin' });
-              }
+              const patch = {};
+              if (wl.mode !== 'api') patch.workLead = { mode: 'api' };
+              if (engineItem.id === 'builtin' && activeEng !== 'builtin') patch.cliEngine = 'builtin';
+              if (Object.keys(patch).length) emitChange(patch);
+              leadPaneSource = 'api';
               opts.onSelectLeadModel?.({ providerId: provId, model: modelId });
               closePopover();
             },
@@ -454,7 +675,7 @@ export function createWorkCliPicker(opts = {}) {
       if (!count) {
         const empty = document.createElement('div');
         empty.className = 'hcp-empty-card';
-        empty.textContent = '暂无可用 API 模型，请点击下方「添加模型」配置密钥。';
+        empty.textContent = '暂无可用 API 模型，可点击右上角「本机 Code CLI」直接选用已安装的官方 CLI，或点击下方「添加模型」。';
         rightList.append(empty);
       }
       return;
@@ -858,12 +1079,12 @@ export function createWorkCliPicker(opts = {}) {
     progressLabel.append(progressToggle, '角色化进度播报');
     leftRail.append(progressLabel);
 
-    // Top unified Role Lead Model slot (replaces separate duplicate #modelTrigger in Work mode!)
+    // Top unified Role Lead Model slot (Commander: discusses requirements, dispatches CLI, reviews delivery)
     const leadSel = opts.getLeadSelection?.();
     if (opts.onSelectLeadModel) {
       const leadTitle = document.createElement('div');
       leadTitle.className = 'hcp-rail-title';
-      leadTitle.textContent = '角色统筹';
+      leadTitle.textContent = '接待指挥（谈需求 / 验收）';
       leftRail.append(leadTitle);
 
       const leadBtn = document.createElement('button');
@@ -875,10 +1096,10 @@ export function createWorkCliPicker(opts = {}) {
       lWrap.className = 'hcp-eng-labels';
       const mTxt = document.createElement('span');
       mTxt.className = 'hcp-eng-name';
-      mTxt.textContent = '接待与调度';
+      mTxt.textContent = '接待与指挥';
       const sTxt = document.createElement('small');
       sTxt.className = 'hcp-eng-sub';
-      sTxt.textContent = prettifyModelShort(leadSel?.model || '选择模型');
+      sTxt.textContent = formatWorkLeadSummary(settings, harnesses) || '选择模型';
       lWrap.append(mTxt, sTxt);
       leadBtn.append(dot, lWrap);
       leadBtn.onclick = ev => {
@@ -891,7 +1112,7 @@ export function createWorkCliPicker(opts = {}) {
 
     const railTitle = document.createElement('div');
     railTitle.className = opts.onSelectLeadModel ? 'hcp-rail-divider' : 'hcp-rail-title';
-    railTitle.textContent = '执行引擎';
+    railTitle.textContent = '实干 CLI（写代码 / 跑命令）';
     leftRail.append(railTitle);
 
     const autoTargetId = resolveAutoTarget(harnesses);
@@ -964,7 +1185,11 @@ export function createWorkCliPicker(opts = {}) {
       });
     }
     for (const it of readyClis) {
-      appendEngineBtn(it, { isReady: true });
+      const desc = harnesses.find(h => h.id === it.id);
+      const modeHint = desc?.executionMode === 'sandbox'
+        ? '沙盒隔离'
+        : (desc?.executionMode === 'host' ? '宿主机' : '');
+      appendEngineBtn(it, { isReady: true, subHint: modeHint });
     }
     if (builtinItem) {
       appendEngineBtn(builtinItem, { isReady: true });
@@ -995,7 +1220,23 @@ export function createWorkCliPicker(opts = {}) {
     ev.stopPropagation();
     const settings = getSettings();
     const activeEng = settings.cliEngine || 'auto';
-    if (activeEng === 'builtin') return;
+    if (activeEng === 'builtin') {
+      const wl = getWorkLeadConfig(settings);
+      if (wl.mode !== 'cli' || !wl.engineId) return;
+      const idx = EFFORT_CYCLE.indexOf(wl.reasoningEffort || '');
+      const nextEff = EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length];
+      emitChange({
+        cliEngine: 'builtin',
+        workLead: {
+          mode: 'cli',
+          engineId: wl.engineId,
+          providerId: wl.providerId,
+          model: wl.model,
+          reasoningEffort: nextEff,
+        },
+      });
+      return;
+    }
     const cfg = getEngineConfig(settings, activeEng);
     const idx = EFFORT_CYCLE.indexOf(cfg.reasoningEffort || '');
     const nextEff = EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length];

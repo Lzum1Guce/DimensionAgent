@@ -38,6 +38,10 @@ Json Application::Impl::group_route_inventory(const RunExecutionContext& ctx,std
             if (entry.find("engineId")) {
                 auto candidate = entry;
                 const bool custom = flag(entry,"custom") && std::any_of(harnesses.begin(), harnesses.end(), [&](const auto& h){return h.installed && h.id == str(entry,"engineId");});
+                const auto descriptor = std::find_if(harnesses.begin(),harnesses.end(),[&](const auto& h){return h.id==str(entry,"engineId");});
+                candidate["executionEnvironment"] = descriptor==harnesses.end() ? "unknown" : descriptor->execution_mode;
+                candidate["browserAccess"] = "unverified";
+                candidate["workbench"] = "cli";
                 candidate["unavailable"] = !custom && !native.contains(pool_key(entry));
                 if (const auto* scores = board.find("scores"))
                     if (const auto* match = scores->find(str(entry,"model"))) candidate["benchmark"] = *match;
@@ -49,6 +53,10 @@ Json Application::Impl::group_route_inventory(const RunExecutionContext& ctx,std
                 candidate = entry;
                 candidate["unavailable"] = true;
             }
+            candidate["workbench"] = "canvas-text";
+            candidate["browserAccess"] = "unverified";
+            for (const auto* key : {"specialties","costTier","manualOnly"})
+                if (const auto* value = entry.find(key)) candidate[key] = *value;
             pool.push_back(std::move(candidate));
         }
     }
@@ -73,7 +81,7 @@ Json Application::Impl::group_route_inventory(const RunExecutionContext& ctx,std
         catalog_summary[pid]=O{{"status",str(v,"status")},{"listedCount",int(v.at("listed").as_array().size())},
             {"checkedAt",str(v,"checkedAt")},{"listedWithBenchmark",suggestions}};
     }
-    return O{{"pool",pool},{"tiers",tiers},{"members",roster},{"catalogs",catalog_summary},{"source",str(board,"source")},
+    return O{{"routingPreference",str(settings,"routingPreference","balanced")},{"pool",pool},{"tiers",tiers},{"members",roster},{"catalogs",catalog_summary},{"source",str(board,"source")},
         {"release",str(board,"release")},{"benchmarkStatus",str(board,"status","unavailable")}};
 }
 
@@ -81,9 +89,16 @@ Json Application::Impl::propose_work_routes(const RunExecutionContext& ctx, cons
         const std::vector<ModelMessage>& history, const std::string& plan, std::stop_token stop) {
     const auto name = bot(ctx.bot_id).name;
     const auto label = lead.provider_id + " / " + lead.config.model;
-    Json proposal = O{{"lead",O{{"providerId",lead.provider_id},{"model",lead.config.model},{"tier",lead.tier}}},
-                      {"jobs",A{}}};
-    std::string report = "预计模型分配\n• 拟定方案：" + name + " · " + label;
+    O lead_doc{{"providerId",lead.provider_id},{"model",lead.config.model},{"tier",lead.tier}};
+    if (lead.config.protocol == "cli-reception") {
+        lead_doc["mode"] = "cli";
+        lead_doc["engineId"] = lead.config.cli_engine_id;
+        lead_doc["cliProvider"] = lead.config.cli_native_provider;
+        lead_doc["cliNativeModel"] = lead.config.cli_native_model;
+        lead_doc["reasoningEffort"] = lead.config.reasoning_effort;
+    }
+    Json proposal = O{{"lead", std::move(lead_doc)}, {"jobs",A{}}};
+    std::string report = "预计模型分配\n• 接待与指挥（谈需求 / 派单 / 验收）：" + name + " · " + label;
     if (ctx.group_id.empty()) {
         const auto selected = configured_cli_engine(ctx.bot_id);
         const auto harnesses = cached_cli_harnesses(false);
@@ -102,25 +117,34 @@ Json Application::Impl::propose_work_routes(const RunExecutionContext& ctx, cons
                          {"model",native?(model.empty()?target->native_default_model:model):specific?model:lead.config.model}};
             if(spec.find("reasoningEffort")) cli["reasoningEffort"]=str(spec,"reasoningEffort");
             proposal["cli"] = cli;
-            report += "\n• 执行：" + name + " · " + target->name + " · " +
-                (str(cli,"model").empty()?"账号默认，具体型号未知":
+            report += "\n• 实干执行（本机 CLI）：" + target->name + " · " +
+                (str(cli,"model").empty()?"账号默认模型":
                 (str(cli,"providerId").empty()?"":str(cli,"providerId")+" / ")+str(cli,"model")) +
-                (selected=="auto"?"（自动选择已安装的 CLI）":"（当前选定的 CLI）");
+                (selected=="auto"?"（自动调度 · 由接待指挥官派单并验收）":"（选定 CLI · 由接待指挥官派单并验收）");
         } else {
-            report += "\n• 执行：" + name + " · 内置 Work · " + label + "（当前工位使用内置工具）";
+            report += "\n• 实干执行：" + name + " · 内置 Work · " + label + "（当前工位使用内置工具）";
         }
     } else {
         auto inventory = group_route_inventory(ctx,stop);
         std::vector<ModelMessage> messages{{"system",
-            "你负责模型分配。仅返回 JSON 对象 {\"jobs\":[{\"botId\":\"成员ID\",\"text\":\"具体职责\","
+            "你负责模型分配与群聊 DimensionImage 协作蓝图绘制。仅返回 JSON 对象："
+            "{\"jobs\":[{\"id\":\"job1\",\"botId\":\"成员ID\",\"title\":\"简短步骤名(<=12字)\",\"text\":\"具体职责\","
             "\"routeReason\":\"选择理由\",\"routeTier\":\"auto\",\"poolModel\":{\"engineId\":\"可选\","
-            "\"providerId\":\"...\",\"model\":\"...\"},\"benchmarkCategory\":\"Coding\"}]}。"
-            "依据用户最新修改和方案选择成员，每个成员最多一个职责。群主独立完成时返回空数组。"
+            "\"providerId\":\"...\",\"model\":\"...\"},\"benchmarkCategory\":\"Coding\"}],"
+            "\"wires\":[{\"from\":\"input或jobId\",\"to\":\"jobId或lead_final\",\"kind\":\"main或supplement\","
+            "\"attachTo\":\"仅supplement时填宿主连线如input->job1\",\"label\":\"简短标注\"}],"
+            "\"needApproval\":false,\"summaryTitle\":\"首席汇总验收\"}。"
+            "依据用户最新修改和方案选择成员，每个成员最多一个职责，合理规划先后依赖(main)或并行顺带补充(supplement)。"
+            "简单改动或职责重叠时由群主独立完成，jobs 返回空数组。需要分工时在 text 写明负责范围、交付物及可检查的验收条件，在 routeReason 说明独立分工的价值；避免并发编辑同一文件。wires/needApproval/summaryTitle/title 为可选字段。"
+            "在每项工作填写 specialty（planning/frontend/backend/debugging/review/testing/routine）、验收条件 acceptance，"
+            "以及 requiresWorkspace（该节点需要实际读写项目或运行命令时为 true）。蓝图的 API 节点只能生成文本；"
+            "浏览器和视觉能力未验证，涉及实测须给出独立验收步骤。仅从可用且非 manualOnly 的组合派单。"
+            "默认由群主负责分工、审查与汇总。未标专长时依据可用能力与任务需求推荐，说明哪些判断来自推断。参考 specialties 和 routingPreference：economy 优先满足要求的低成本组合，quality 优先专长匹配。"
             "池非空时必须从池中选择；池为空省略 poolModel，可选已配置档位。仅在确实使用对应榜单时填写 benchmarkCategory。"
             "群主ID："+ctx.bot_id+"。可用路线："+inventory.dump(),{}, {}}};
         for (const auto& m:history) if(m.role=="user") messages.push_back(m);
-        messages.push_back({"user","为以下待确认方案分配模型：\n"+plan,{},{}});
-        const auto reply=call_model(lead.config,messages,{}, {},stop);
+        messages.push_back({"user","为以下待确认方案绘制协作蓝图并分配模型：\n"+plan,{},{}});
+        const auto reply=budgeted_model("work",lead.config,messages,{}, {},stop);
         auto first=reply.text.find('{'), last=reply.text.rfind('}');
         if(first==reply.text.npos || last==reply.text.npos || last<first) throw ApiError(409,"分配模型未返回有效计划，请重新生成方案");
         const auto parsed=Json::parse(reply.text.substr(first,last-first+1));
@@ -128,13 +152,22 @@ Json Application::Impl::propose_work_routes(const RunExecutionContext& ctx, cons
         if(jobs.size()>16)throw ApiError(400,"分配计划超过16个工位");
         A normalized;
         std::set<std::string> seen;
+        std::map<std::string, std::string> raw_id_to_norm;
         for(const auto& row:jobs){
             const auto member=required_string(row,"botId"), task=required_string(row,"text");
             if(member==ctx.bot_id || !inventory.at("members").find(member) || !seen.insert(member).second ||
                 task.size()>1800 || str(row,"routeReason").size()>600)throw ApiError(409,"分配计划成员或职责无效，请重新规划");
             require_group_member(ctx.group_id,member,Mode::Work);
-            Json job=O{{"botId",member},{"id","job"+std::to_string(normalized.size()+1)},{"text",task},
+            const std::string norm_id = "job" + std::to_string(normalized.size() + 1);
+            const std::string raw_id = str(row, "id");
+            if (!raw_id.empty()) raw_id_to_norm[raw_id] = norm_id;
+            raw_id_to_norm[norm_id] = norm_id;
+            Json job=O{{"botId",member},{"id",norm_id},{"text",task},
+                {"title",str(row,"title")},
                 {"routeTier",str(row,"routeTier","auto")},{"routeReason",str(row,"routeReason")},{"benchmarkCategory",str(row,"benchmarkCategory")}};
+            job["specialty"] = str(row,"specialty");
+            job["acceptance"] = clip_utf8_label(str(row,"acceptance"),240);
+            job["requiresWorkspace"] = flag(row,"requiresWorkspace");
             if(const auto* pick=row.find("poolModel")){
                 Json allowed=O{{"providerId",str(*pick,"providerId")},{"model",required_string(*pick,"model")}};
                 if(!str(*pick,"engineId").empty())allowed["engineId"]=str(*pick,"engineId");
@@ -147,6 +180,17 @@ Json Application::Impl::propose_work_routes(const RunExecutionContext& ctx, cons
         if(!jobs.empty()){
             report_dispatch(ctx,proposal.at("jobs"),false,stop,&proposal,&inventory);
             report+="\n"+str(proposal,"report");
+        }
+        if (canvas_runtime) {
+            try {
+                synthesize_group_blueprint(ctx, lead, proposal, parsed, raw_id_to_norm, plan);
+                report += "\n\n📐 首席已为你绘制 DimensionImage 协同蓝图「" + str(proposal, "blueprintName") + "」（" +
+                    std::to_string(static_cast<int>(num(proposal, "blueprintNodeCount", 0))) + " 个步骤 · " +
+                    std::to_string(static_cast<int>(num(proposal, "blueprintEdgeCount", 0))) +
+                    " 条连线），已同步到右侧「蓝图」工作台——你可以直接修改任意节点的 Bot、模型/CLI 和连线流向，满意后点「按当前蓝图开工」。";
+            } catch (const std::exception& ex) {
+                throw ApiError(409,std::string("群聊蓝图未更新：")+ex.what());
+            }
         }
     }
     std::set<std::string> alternatives;
@@ -217,13 +261,27 @@ std::map<std::string,Json> Application::Impl::report_dispatch(const RunExecution
         const auto& pool = inventory.at("pool").as_array();
         const auto* requested = item.find("poolModel");
         if (!pool.empty() || requested) {
+            auto child_ctx = ctx;
+            child_ctx.bot_id = member;
+            const bool sandbox_only = sandbox_cli_required(ctx) || sandbox_cli_required(child_ctx);
+            int best_score = -1;
             for (const auto& candidate : pool) {
-                if (flag(candidate, "unavailable")) continue;
+                const bool cli = candidate.find("engineId") != nullptr;
+                if (flag(candidate,"unavailable") || flag(candidate,"manualOnly") || (cli && sandbox_only) ||
+                    (!cli && proposal && flag(item,"requiresWorkspace"))) continue;
                 if (requested && pool_key(*requested) != pool_key(candidate)) continue;
-                selection = candidate;
-                break;
+                int score = 0;
+                const auto pref = str(inventory,"routingPreference","balanced");
+                if (const auto* tags = candidate.find("specialties"); tags && tags->is_array())
+                    for (const auto& tag : tags->as_array())
+                        if (tag.as_string()==str(item,"specialty")) { score += 4; break; }
+                if (str(candidate,"costTier")=="low") {
+                    if (pref=="economy") score += 5;
+                    else if (pref=="balanced") score += 1;
+                }
+                if (score > best_score) { best_score = score; selection = candidate; }
             }
-            if (!selection.is_object()) throw ApiError(400, "请从群聊可选模型池选择可用的服务商与模型");
+            if (!selection.is_object()) throw ApiError(400, "没有满足此次派单条件的组合，请检查模型池、手动专用设置与工位要求");
         } else if(tier!="auto"){
             selection=tier=="member"?obj(roster,"member"):obj(obj(inventory,"tiers"),tier);
             if(str(selection,"model").empty())throw ApiError(400,"该路线未配置，请选用已有档位或沿用成员模型");
@@ -231,6 +289,8 @@ std::map<std::string,Json> Application::Impl::report_dispatch(const RunExecution
         auto child=ctx;child.bot_id=member;
         const auto input=task+"\n"+parent;
         const bool native = selection.find("engineId") != nullptr;
+        if (proposal && !native && flag(item,"requiresWorkspace"))
+            throw ApiError(409,"该蓝图节点需要工作区操作，请在允许池中选择可用 CLI 或调整分工");
         if (native && (sandbox_cli_required(ctx) || sandbox_cli_required(child)))
             throw ApiError(409,"该工位要求沙盒执行，请选择 Work 模型或 Windows 本机工位");
         const auto route=model_routes(child,&input,native ? Json{} : selection).front();
@@ -251,6 +311,11 @@ std::map<std::string,Json> Application::Impl::report_dispatch(const RunExecution
             report+="；LiveBench "+categories.at(category)+"第 "+std::to_string(int(num(score,"rank")))+"/"+std::to_string(int(num(score,"of")))+" 名";
         } else if(!proposal) report+="；该任务维度暂无可核实排名";
         auto why=str(item,"routeReason");report+="。"+(why.empty()?"沿用当前任务难度和已配置路线。":excerpt(why,240));
+        if (!str(item,"acceptance").empty()) report+="\n  验收："+str(item,"acceptance");
+        if (!pool.empty()) {
+            const auto cost=str(selection,"costTier");
+            report+="\n  成本档："+std::string(cost=="low"?"低":cost=="standard"?"标准":cost=="high"?"高":"未知");
+        }
         if(proposal && !native) report+=" 执行引擎：内置 Work。";
         const auto engine=str(item,"preferredEngine",str(roster,"cliEngine"));
         if(!proposal && !native && engine!="builtin"){

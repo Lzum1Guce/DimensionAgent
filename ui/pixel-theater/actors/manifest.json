@@ -1,0 +1,815 @@
+{
+  "version": "v5-isnet-zero-flicker",
+  "canvas": [
+    288,
+    288
+  ],
+  "foot_y": 278,
+  "characters": {
+    "ai-deepseek": {
+      "name": "DeepSeek · 蓝发鲸鱼女仆",
+      "defaultFacing": 1,
+      "actions": {
+        "idle": {
+          "label": "待机呼吸",
+          "category": "base",
+          "sheet": "actors/ai-deepseek/deepseek_idle_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 181.1
+        },
+        "changtai": {
+          "label": "常态微笑",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_changtai_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 185.8
+        },
+        "kaixin": {
+          "label": "开心跃动",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_kaixin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 187.9
+        },
+        "xingyan": {
+          "label": "星星眼",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_xingyan_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 187.9
+        },
+        "tiaopi": {
+          "label": "调皮眨眼",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_tiaopi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 185.4
+        },
+        "wenrou": {
+          "label": "温柔浅笑",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_wenrou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 188.7
+        },
+        "anxin": {
+          "label": "安心闭眼",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_anxin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 180.6
+        },
+        "haoqi": {
+          "label": "好奇张望",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_haoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 191.0
+        },
+        "jingya": {
+          "label": "惊讶睁眼",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_jingya_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 192.8
+        },
+        "renzhen": {
+          "label": "认真思考",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_renzhen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 180.3
+        },
+        "wuyu": {
+          "label": "无语摊手",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_wuyu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 185.9
+        },
+        "haixiu": {
+          "label": "害羞脸红",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_haixiu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 181.7
+        },
+        "danxin": {
+          "label": "担心皱眉",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_danxin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 185.8
+        },
+        "chicu": {
+          "label": "吃醋鼓腮",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_chicu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 186.3
+        },
+        "shiluo": {
+          "label": "失落低头",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_shiluo_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 186.6
+        },
+        "haqi": {
+          "label": "气鼓鼓哈气",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_haqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 184.7
+        },
+        "daku": {
+          "label": "委屈大哭",
+          "category": "emo",
+          "sheet": "actors/ai-deepseek/deepseek_daku_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 186.6
+        },
+        "walk": {
+          "label": "走路入场(v2修正)",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_walk_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 177.4
+        },
+        "act_jugong": {
+          "label": "优雅鞠躬",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_jugong_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 186.7
+        },
+        "act_huishou": {
+          "label": "挥手致意",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_huishou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 193.5
+        },
+        "act_zuoxia": {
+          "label": "坐下歇息",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_zuoxia_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 192.1
+        },
+        "act_zhuanshen": {
+          "label": "轻盈转身",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_zhuanshen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 174.9
+        },
+        "act_tiaoqi": {
+          "label": "欢快跳起",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_tiaoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 196.4
+        },
+        "act_tiaowu": {
+          "label": "舞台起舞",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_tiaowu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 192.3
+        },
+        "act_didongxi": {
+          "label": "双手递物",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_didongxi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 189.0
+        },
+        "act_zhi": {
+          "label": "指向前方",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_zhi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 179.4
+        },
+        "act_guzhang": {
+          "label": "鼓掌喝彩",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_guzhang_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 178.9
+        },
+        "act_pao": {
+          "label": "小步奔跑",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_pao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 178.6
+        },
+        "act_diantou": {
+          "label": "点头赞同",
+          "category": "act",
+          "sheet": "actors/ai-deepseek/deepseek_act_diantou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 186.6
+        }
+      }
+    },
+    "ai-gemini": {
+      "name": "Gemini · 猫耳星星娘",
+      "defaultFacing": -1,
+      "actions": {
+        "idle": {
+          "label": "待机呼吸",
+          "category": "base",
+          "sheet": "actors/ai-gemini/gemini_idle_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 150.7
+        },
+        "changtai": {
+          "label": "常态微笑",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_changtai_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 158.7
+        },
+        "biye": {
+          "label": "双手比耶",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_biye_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 162.9
+        },
+        "xingyan": {
+          "label": "捧脸星眼",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_xingyan_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 159.1
+        },
+        "maozhua": {
+          "label": "猫爪眨眼",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_maozhua_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 158.6
+        },
+        "wenrou": {
+          "label": "背手温柔",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_wenrou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 162.7
+        },
+        "anxin": {
+          "label": "安心闭眼",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_anxin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 159.4
+        },
+        "haoqi": {
+          "label": "好奇凑近",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_haoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 177.2
+        },
+        "jingya": {
+          "label": "双掌惊讶",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_jingya_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 162.0
+        },
+        "renzhen": {
+          "label": "认真托腮",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_renzhen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 157.3
+        },
+        "wuyu": {
+          "label": "无语摊手",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_wuyu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 158.9
+        },
+        "haixiu": {
+          "label": "害羞对指",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_haixiu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 158.7
+        },
+        "huangzhang": {
+          "label": "慌张关切",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_huangzhang_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 163.8
+        },
+        "chicu": {
+          "label": "吃醋抱臂",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_chicu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 156.9
+        },
+        "shiluo": {
+          "label": "失落垂耳",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_shiluo_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 154.8
+        },
+        "zhamao": {
+          "label": "可爱炸毛",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_zhamao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 185.7
+        },
+        "daku": {
+          "label": "委屈大哭",
+          "category": "emo",
+          "sheet": "actors/ai-gemini/gemini_daku_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 160.0
+        },
+        "walk": {
+          "label": "走路入场(v2修正)",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_walk_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 167.4
+        },
+        "act_jugong": {
+          "label": "优雅鞠躬",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_jugong_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 152.8
+        },
+        "act_huishou": {
+          "label": "挥手致意",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_huishou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 168.4
+        },
+        "act_zuoxia": {
+          "label": "坐下歇息",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_zuoxia_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 177.5
+        },
+        "act_zhuanshen": {
+          "label": "轻盈转身",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_zhuanshen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 166.6
+        },
+        "act_tiaoqi": {
+          "label": "腾空跳起",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_tiaoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 165.3
+        },
+        "act_tiaowu": {
+          "label": "舞台起舞",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_tiaowu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 168.4
+        },
+        "act_didongxi": {
+          "label": "双手递物",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_didongxi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 171.4
+        },
+        "act_zhi": {
+          "label": "指向前方",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_zhi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 165.7
+        },
+        "act_guzhang": {
+          "label": "鼓掌喝彩",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_guzhang_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 159.7
+        },
+        "act_pao": {
+          "label": "小步奔跑",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_pao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 164.0
+        },
+        "act_diantou": {
+          "label": "点头赞同",
+          "category": "act",
+          "sheet": "actors/ai-gemini/gemini_act_diantou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 120,
+          "kb": 157.7
+        }
+      }
+    },
+    "ai-grok": {
+      "name": "Grok · 金发斧娘",
+      "defaultFacing": 1,
+      "nativeFacing": {
+        "walk": 1,
+        "act_pao": 1
+      },
+      "actions": {
+        "act_diantou": {
+          "label": "点头赞同",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_diantou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 203.4
+        },
+        "act_didongxi": {
+          "label": "双手递物",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_didongxi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 185.1
+        },
+        "act_guzhang": {
+          "label": "鼓掌喝彩",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_guzhang_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 212.9
+        },
+        "act_huishou": {
+          "label": "挥手致意",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_huishou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 213.2
+        },
+        "act_jugong": {
+          "label": "优雅鞠躬",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_jugong_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 219.5
+        },
+        "act_pao": {
+          "label": "小步奔跑",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_pao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 196.7
+        },
+        "act_tiaoqi": {
+          "label": "欢快跳起",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_tiaoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 184.8
+        },
+        "act_tiaowu": {
+          "label": "舞台起舞",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_tiaowu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 206.2
+        },
+        "act_zhi": {
+          "label": "指向前方",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_zhi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 204.4
+        },
+        "act_zhuanshen": {
+          "label": "轻盈转身",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_zhuanshen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 187.9
+        },
+        "act_zuoxia": {
+          "label": "坐下歇息",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_act_zuoxia_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 226.2
+        },
+        "anxin": {
+          "label": "安心闭眼",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_anxin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 224.0
+        },
+        "aojiao": {
+          "label": "傲娇鼓腮",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_aojiao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 175.5
+        },
+        "changtai": {
+          "label": "常态微笑",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_changtai_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 202.1
+        },
+        "danxin": {
+          "label": "担心皱眉",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_danxin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 175.3
+        },
+        "daxiao": {
+          "label": "开怀大笑",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_daxiao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 206.7
+        },
+        "haixiu": {
+          "label": "害羞脸红",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_haixiu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 189.5
+        },
+        "haoqi": {
+          "label": "好奇张望",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_haoqi_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 218.6
+        },
+        "idle": {
+          "label": "待机呼吸",
+          "category": "base",
+          "sheet": "actors/ai-grok/grok_idle_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 220.1
+        },
+        "jiaochen": {
+          "label": "娇嗔哈气",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_jiaochen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 178.1
+        },
+        "jingya": {
+          "label": "惊讶睁眼",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_jingya_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 176.7
+        },
+        "pujin": {
+          "label": "扑近调皮",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_pujin_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 204.0
+        },
+        "qingxiao": {
+          "label": "轻笑捂嘴",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_qingxiao_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 226.6
+        },
+        "renzhen": {
+          "label": "认真思考",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_renzhen_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 200.9
+        },
+        "shiluo": {
+          "label": "失落低头",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_shiluo_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 172.1
+        },
+        "walk": {
+          "label": "走路入场",
+          "category": "act",
+          "sheet": "actors/ai-grok/grok_walk_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 105,
+          "kb": 212.8
+        },
+        "wenrou": {
+          "label": "温柔浅笑",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_wenrou_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 184.0
+        },
+        "wuyu": {
+          "label": "无语摊手",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_wuyu_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 150.5
+        },
+        "xingyan": {
+          "label": "星星眼",
+          "category": "emo",
+          "sheet": "actors/ai-grok/grok_xingyan_sheet.webp",
+          "frames": 14,
+          "mode": "loop",
+          "durMs": 135,
+          "kb": 238.0
+        }
+      }
+    }
+  }
+}

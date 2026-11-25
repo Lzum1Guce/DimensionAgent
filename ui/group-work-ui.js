@@ -212,6 +212,7 @@ export function bindWorkShellUi(opts) {
   const pick = document.getElementById('workCwdPick');
   const pathEl = document.getElementById('workCwdPath');
   const desktopBtn = document.getElementById('linuxDesktopBtn');
+  const browserBtn = document.getElementById('workBrowserBtn');
   let cliPicker = null;
   if (bar && !document.getElementById('workCliPickerTrigger')) {
     document.getElementById('workCliEngineSelect')?.remove();
@@ -224,9 +225,11 @@ export function bindWorkShellUi(opts) {
       onSelectLeadModel: sel => opts.onSelectLeadModel?.(sel),
       getProviderGroups: () => opts.getProviderGroups?.() || [],
       onChange: payload => opts.onCliHarnessChange?.(payload),
-      onRefresh: () => opts.onRefreshCliAndModels?.(),
+      onRefresh: arg => opts.onRefreshCliAndModels?.(arg),
       onAddCustomModel: () => opts.onAddCustomModel?.(),
       onEditModels: () => opts.onEditModels?.(),
+      onOpenCliSandboxSettings: () => opts.onOpenCliSandboxSettings?.(),
+      onOpenCliReceptionModal: () => opts.onOpenCliReceptionModal?.(),
     });
     bar.append(cliPicker.node);
   }
@@ -235,6 +238,7 @@ export function bindWorkShellUi(opts) {
     if (bar) bar.hidden = !work;
     if (attach) attach.hidden = !work;
     if (desktopBtn) desktopBtn.hidden = !work;
+    if (browserBtn) browserBtn.hidden = !work;
     if (!work) {
       cliPicker?.close();
       cwdMenu?.setAttribute('hidden', '');

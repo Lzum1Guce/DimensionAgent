@@ -117,15 +117,15 @@ html[data-motion="full"] .transcript .bubble.mfx-settle::before {
   100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--color-accent) 0%, transparent), 0 4px 20px rgba(0, 0, 0, 0.055); }
 }
 
-/* ═════════════ 3. 闲谈 / 工坊切换 ═════════════ */
-/* 分段按钮：一枚滑块在两个选项之间滑动（替代各自独立的选中底色） */
+/* ═════════════ 3. 闲谈 / 工坊 / 游乐场三段切换 ═════════════ */
+/* 分段按钮：一枚滑块在三个模式之间平滑滑动 */
 .mode-seg-pill::before {
   content: "";
   position: absolute;
   top: 3px;
   bottom: 3px;
   left: 3px;
-  width: calc((100% - 8px) / 2);
+  width: calc((100% - 10px) / 3);
   border-radius: 8px;
   background: var(--color-raised);
   box-shadow: var(--shadow-sm), var(--surface-highlight);
@@ -134,6 +134,7 @@ html[data-motion="full"] .transcript .bubble.mfx-settle::before {
   z-index: 0;
 }
 .mode-seg-pill:has(.mode-seg-tab[data-shell-target="work"].is-active)::before { transform: translateX(calc(100% + 2px)); }
+.mode-seg-pill:has(.mode-seg-tab[data-shell-target="playground"].is-active)::before { transform: translateX(calc(200% + 4px)); }
 .mode-seg-pill .mode-seg-tab { position: relative; z-index: 1; }
 .mode-seg-pill .mode-seg-tab.is-active { background: transparent; box-shadow: none; }
 .mode-seg-tab svg { transition: transform 0.36s var(--mfx-ease-spring), color 0.2s ease; }
@@ -206,7 +207,7 @@ dialog[open]::backdrop { animation: mfxBackdropIn 0.3s ease; }
 .mfx-sky.is-day::before { background: radial-gradient(ellipse 55% 45% at 62% 20%, color-mix(in srgb, #ffe6a8 18%, transparent), transparent 70%); }
 .mfx-sky.is-dusk::before { background: linear-gradient(180deg, color-mix(in srgb, #8f7ac8 10%, transparent), color-mix(in srgb, #f29a6b 16%, transparent) 70%, transparent); }
 .mfx-sky.is-night::before { background: radial-gradient(ellipse 70% 60% at 50% 30%, color-mix(in srgb, #4a5aa8 12%, transparent), transparent 72%); }
-html[data-theme="nightink"] .mfx-sky::before { opacity: 0.7; }
+html:is([data-theme="nightink"], [data-theme="codex"]) .mfx-sky::before { opacity: 0.7; }
 
 .mfx-star {
   position: absolute;
@@ -347,7 +348,7 @@ html[data-motion="full"] .group-empty::before { animation: mfxTwinkle 3.2s ease-
   mix-blend-mode: multiply;
   animation: mfxStamp 0.46s cubic-bezier(0.2, 1.4, 0.4, 1) both;
 }
-html[data-theme="nightink"] .mfx-stamp { mix-blend-mode: normal; }
+html:is([data-theme="nightink"], [data-theme="codex"]) .mfx-stamp { mix-blend-mode: normal; }
 .mfx-stamp.is-allow { color: #c8402f; box-shadow: inset 0 0 0 2px color-mix(in srgb, #c8402f 25%, transparent); }
 .mfx-stamp.is-deny { color: color-mix(in srgb, var(--color-ink) 70%, transparent); }
 @keyframes mfxStamp {
@@ -459,9 +460,9 @@ html[data-motion="full"] .mfx-stamp.is-allow::after {
 .transcript-jump-pill:hover .transcript-jump-arrow {
   background: rgba(255, 255, 255, 0.22);
 }
-html[data-theme="nightink"] .transcript-jump-pill {
-  background: color-mix(in srgb, #25221E 92%, var(--color-accent, #E08364) 8%);
-  border-color: color-mix(in srgb, var(--color-accent, #E08364) 42%, rgba(255, 255, 255, 0.12));
+html:is([data-theme="nightink"], [data-theme="codex"]) .transcript-jump-pill {
+  background: color-mix(in srgb, var(--color-raised) 92%, var(--color-accent) 8%);
+  border-color: color-mix(in srgb, var(--color-accent) 42%, rgba(255, 255, 255, 0.12));
   box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.55);
 }
 .transcript-jump-pill.is-pulsing {

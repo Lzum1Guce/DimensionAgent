@@ -104,7 +104,7 @@ public:
                                                   const std::string& user_prompt,
                                                   std::stop_token stop)>;
 
-    // `data_root` is Dimension's persistent data root (e.g. the local client data directory).
+    // `data_root` is Dimension's persistent data root (e.g. L:\DimensionAgent\native-data-v1).
     // Stores:
     //   - <data_root>/craft-evolution/global-pitfalls.json (shared across all Bots)
     //   - <data_root>/craft-evolution/bots/<bot_id>/craft-profile.json (independent per Bot)

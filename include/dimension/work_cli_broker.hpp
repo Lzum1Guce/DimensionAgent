@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -24,10 +25,10 @@ struct CliNativeModelGroup {
 };
 
 struct CliHarnessDescriptor {
-    std::string id;               // "hermes", "kimi-code", "claude-code", "codex", "opencode", "qwen-code", "gemini-cli"
+    std::string id;               // "hermes", "deepseek-harness", "kimi-code", "claude-code", "codex", "opencode", "qwen-code", "gemini-cli"
     std::string name;             // Display label
-    std::string platform;         // "windows" or "wsl"
-    std::string binary_path;      // Resolved absolute path when installed
+    std::string platform;         // Active platform resolved by execution policy: "wsl" (Bubblewrap sandbox) or "windows"
+    std::string binary_path;      // Resolved active absolute path when installed
     std::string version;          // Optional detected version string
     bool installed = false;
     bool supports_custom_model = true;
@@ -37,6 +38,19 @@ struct CliHarnessDescriptor {
     std::string native_status_label;                     // Clean Chinese status e.g. "已就绪 · 原生配置已连接"
     std::string native_default_model;                    // Detected default model in native config if any
     std::vector<CliNativeModelGroup> native_model_groups;// Discovered + built-in native subscription models
+
+    // Dual-location (Sandbox vs Host) awareness for Bubblewrap CLI isolation & in-app downloader
+    bool sandbox_installed = false;
+    std::string sandbox_binary_path;
+    std::string sandbox_version;
+    bool sandbox_native_configured = false;
+    bool host_installed = false;
+    std::string host_binary_path;
+    std::string host_version;
+    bool host_native_configured = false;
+    bool sandbox_installable = true;
+    std::string sandbox_install_package;                 // Official npm package or official Linux installer URL
+    std::string execution_mode;                          // "sandbox" | "host" | ""
     Json to_json() const;
 };
 
@@ -118,6 +132,9 @@ struct CliHarnessRunRequest {
     bool require_exact_engine = false;
     bool file_prompt_for_batch = false; // Keep project file contents out of cmd.exe argument parsing.
     bool use_worktree = false;           // Optional git worktree isolation for concurrent multi-bot edits
+    bool read_only_reception = false;    // Read-only Work reception/orchestration mode (no workspace writes, no skills/MCP)
+    std::string execution_policy = "sandbox_first"; // "sandbox_first" | "sandbox_only" | "host_prefer"
+    bool require_sandbox = false;        // Hard-enforce Bubblewrap WSL sandbox execution (never fall back to host)
     int timeout_seconds = 1200;
 };
 
@@ -176,10 +193,93 @@ std::string compose_persona_delivery(const std::string& bot_name,
                                      const BrokerCaller& caller = {},
                                      std::stop_token stop = {});
 
-// 5. Discovers all 6+ mainstream Agent CLIs across Windows host, bundled cli-kit, and WSL sandbox.
+// 5. Discovers all 8 mainstream Agent CLIs across WSL Bubblewrap sandbox (/opt/dimension-tools),
+//    Windows host, and bundled cli-kit, resolving active runtime according to execution_policy.
 std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::path& app_root,
                                                          const std::filesystem::path& wsl_executable = {},
-                                                         const std::string& sandbox_distribution = {});
+                                                         const std::string& sandbox_distribution = {},
+                                                         std::string_view execution_policy = "sandbox_first");
+
+// 5b. Sandbox CLI environment probe, controlled in-sandbox downloader/uninstaller, and interactive login launcher.
+struct SandboxCliEnvironmentStatus {
+    bool wsl_available = false;
+    bool distro_ready = false;
+    bool bwrap_ready = false;
+    bool node_ready = false;
+    bool npm_ready = false;
+    bool python_ready = false;
+    bool ready = false;
+    std::string node_version;
+    std::string detail;
+    Json to_json() const;
+};
+
+struct SandboxCliInstallRequest {
+    std::string engine_id;                          // Valid CLI engine ID (excluding auto/builtin)
+    std::string action = "install";                 // "install" | "update" | "uninstall"
+    std::string registry = "npmmirror";             // "npmmirror" | "official"
+    bool clear_credentials = false;                 // Optional on uninstall: wipe /var/lib/dimension-cli-homes/<engine>
+    std::filesystem::path wsl_executable;
+    std::string sandbox_distribution;
+};
+
+struct SandboxCliInstallResult {
+    bool ok = false;
+    bool cancelled = false;
+    int exit_code = -1;
+    std::string engine_id;
+    std::string version;
+    std::string binary_path;
+    std::string error;
+    std::vector<std::string> logs;
+    Json to_json() const;
+};
+
+SandboxCliEnvironmentStatus probe_sandbox_cli_environment(const std::filesystem::path& wsl_executable,
+                                                          const std::string& sandbox_distribution);
+
+SandboxCliInstallResult manage_sandbox_cli(const SandboxCliInstallRequest& req,
+                                           const std::function<void(std::string_view)>& on_log = {},
+                                           std::stop_token stop = {});
+
+Json launch_sandbox_cli_login_terminal(const std::string& engine_id,
+                                       const std::filesystem::path& wsl_executable,
+                                       const std::string& sandbox_distribution);
+
+Json launch_host_cli_login_terminal(const std::string& engine_id,
+                                    const std::filesystem::path& app_root);
+
+// Lightweight background keep-alive daemon that keeps WSL2 dimension-sandbox warm
+// so Agents and DimensionImage can invoke all installed CLIs without cold-start lag.
+class CliSandboxKeepAliveDaemon {
+public:
+    CliSandboxKeepAliveDaemon() = default;
+    ~CliSandboxKeepAliveDaemon();
+    CliSandboxKeepAliveDaemon(const CliSandboxKeepAliveDaemon&) = delete;
+    CliSandboxKeepAliveDaemon& operator=(const CliSandboxKeepAliveDaemon&) = delete;
+
+    Json start(const std::filesystem::path& wsl_executable, const std::string& sandbox_distribution);
+    Json stop();
+    Json status() const;
+
+private:
+    Json status_locked() const;
+    void close_handle_locked() const;
+
+    mutable std::mutex mu_;
+    mutable void* process_handle_ = nullptr;
+    mutable std::uint32_t pid_ = 0;
+    mutable std::int64_t started_ms_ = 0;
+    mutable std::string distro_;
+    mutable std::string last_error_;
+};
+
+bool query_windows_autostart_enabled();
+Json set_windows_autostart_enabled(bool enable, const std::filesystem::path& host_exe_path);
+
+// Converts a Windows drive path (e.g. L:\proj) or WSL UNC path (\\wsl.localhost\distro\home\...) to Linux path.
+std::string windows_path_to_wsl_path(const std::filesystem::path& win_path,
+                                     const std::string& sandbox_distribution = {});
 
 // 6. Normalizes a single JSONL line from Hermes, Kimi Code, Claude Code, Codex, OpenCode, Qwen, or Gemini CLI.
 //    Returns true if the line was a recognized structured event.
@@ -209,6 +309,11 @@ struct PreparedCliInvocation {
     std::filesystem::path session_id_map_file;
     std::string stdin_payload;
     std::string model_label;
+    bool use_bwrap_sandbox = false;
+    std::string linux_workspace_path;
+    std::string linux_home_path;
+    std::string linux_task_dir;
+    std::vector<std::string> bwrap_args;
 };
 
 PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
@@ -219,5 +324,55 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
 CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
                                     const CliEventCallback& on_event = {},
                                     std::stop_token stop = {});
+
+// 10. Official local CLI reception adapter (Work lead & Chat/Group reception): serializes native messages
+//     & allowed tools into a read-only prompt and parses structured <dimension_tool_call> blocks back
+//     into standard ModelReply so RunService & frontend work seamlessly without any proxy or token extraction.
+class ReceptionTextStreamFilter {
+public:
+    void feed(std::string_view chunk, const std::function<void(std::string_view)>& on_text);
+    void flush(const std::function<void(std::string_view)>& on_text);
+    bool emitted_any() const { return emitted_any_; }
+    void reset();
+
+private:
+    bool inside_tool_tag_ = false;
+    bool emitted_any_ = false;
+    std::string pending_;
+};
+
+std::string build_cli_reception_prompt(const std::vector<ModelMessage>& messages,
+                                       const std::vector<ModelTool>& tools,
+                                       std::string_view context_feature = "work",
+                                       std::string_view engine_id = {});
+
+std::string build_cli_reception_delta_prompt(const std::vector<ModelMessage>& new_messages);
+
+std::string compute_cli_reception_system_fingerprint(const ModelConfig& config,
+                                                     const std::vector<ModelMessage>& messages,
+                                                     const std::vector<ModelTool>& tools);
+
+ModelReply parse_cli_reception_reply(std::string_view raw_text,
+                                     const std::vector<ModelTool>& allowed_tools);
+
+void prewarm_cli_reception_engine(const std::string& engine_id,
+                                  const std::filesystem::path& data_root,
+                                  const std::filesystem::path& app_root,
+                                  const std::filesystem::path& wsl_executable = {},
+                                  const std::string& sandbox_distribution = {},
+                                  const std::string& execution_policy = "sandbox_first");
+
+void shutdown_cli_reception_pool();
+
+ModelReply call_cli_as_work_lead(const ModelConfig& config,
+                                 const std::vector<ModelMessage>& messages,
+                                 const std::vector<ModelTool>& tools,
+                                 const std::filesystem::path& data_root,
+                                 const std::filesystem::path& app_root,
+                                 ModelChunk chunk = {},
+                                 std::stop_token stop = {},
+                                 const std::filesystem::path& wsl_executable = {},
+                                 const std::string& sandbox_distribution = {},
+                                 const std::string& execution_policy = "sandbox_first");
 
 } // namespace dimension

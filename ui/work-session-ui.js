@@ -644,6 +644,35 @@ function formatDeliverableSize(bytes) {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+export function deliveryEvidenceLabel(files) {
+  const names = files.map(file => file.name || '');
+  const verified = files.filter(file => file.outputEvidence).length;
+  if (verified) return `已核验 ${verified} 个命令输出快照`;
+  if (names.some(name => /\.(?:dll|exe|apk|jar|wasm|so|dylib)$/i.test(name)))
+    return '含二进制文件 · 构建与运行待核验';
+  if (names.some(name => /\.(?:csproj|sln|cs|cpp|cc|cxx|rs|java|kt|vcxproj|fsproj)$/i.test(name)))
+    return '含工程源码 · 暂无构建产物核验记录';
+  return '';
+}
+
+function appendDeliveryEvidence(card, files) {
+  const label = deliveryEvidenceLabel(files);
+  if (!label) return;
+  const verified = files.filter(file => file.outputEvidence);
+  if (!verified.length) {
+    card.append(el('p', 'deliverable-meta', label));
+    return;
+  }
+  const details = el('details', 'deliverable-tree');
+  details.append(el('summary', '', label));
+  for (const file of verified) {
+    const proof = file.outputEvidence;
+    details.append(el('p', 'deliverable-meta', `${proof.output} · ${proof.command} 退出 0 · 执行时 SHA-256 ${proof.sha256}`));
+  }
+  details.append(el('p', 'deliverable-meta', '快照记录覆盖命令退出和输出文件；运行或宿主加载需单独验证。'));
+  card.append(details);
+}
+
 function derivePackageTitle(run, deliverables) {
   const rels = deliverables.map(f => String(f.relativePath || f.name || '').replace(/\\/g, '/'));
   let commonTop = '';
@@ -790,6 +819,7 @@ function renderDeliverablePackageZone({
     saveBtn.onclick = () => void runLocalExport({ btn: saveBtn, statusRow, forceFolder: false });
 
     card.append(mainRow, statusRow);
+    appendDeliveryEvidence(card, effectiveDeliverables);
     artifactStrip.append(card);
   } else if (effectiveDeliverables.length >= 1) {
     const pkgTitle = derivePackageTitle(run, effectiveDeliverables);
@@ -852,6 +882,7 @@ function renderDeliverablePackageZone({
     saveFolderBtn.onclick = () => void runLocalExport({ btn: saveFolderBtn, statusRow, folderName: pkgTitle, forceFolder: true });
 
     card.append(mainRow, treeDetails, statusRow);
+    appendDeliveryEvidence(card, effectiveDeliverables);
     artifactStrip.append(card);
   }
 
@@ -1145,6 +1176,10 @@ function createClaudeSoloThreadView(run, {
         }
       } else if (event.kind === 'plan' && event.dispatchPlan) {
         sealRollup(event.ts); appendAssistantTurn(event.text, event);
+      } else if (event.kind === 'blueprint-started') {
+        if (String(event.text || '').trim()) {
+          ensureRollup(event.ts).completeCommentaryBlock(event.text);
+        }
       } else if (event.kind === 'plan') {
         if (String(event.text || '').trim()) {
           ensureRollup(event.ts).completeCommentaryBlock(event.text);
@@ -2646,9 +2681,12 @@ export function createWorkSessionUi({
     }
     const view = rootViews.get(record.id) || inspectorViews.get(record.id);
     if (!view?.accept(event)) return;
+    if (event.kind === 'blueprint-started' && event.canvasId && event.canvasRunId) {
+      void dock?.attachCanvasRun?.(event.canvasId, event.canvasRunId, { reveal: true });
+    }
     record = records.find(r => r.id === record.id) || record;
     if (!Array.isArray(record.events)) record.events = [];
-    if (['project-instructions', 'broker-enriched', 'cli-step', 'tool', 'input', 'run-state'].includes(event.kind)) {
+    if (['project-instructions', 'broker-enriched', 'cli-step', 'tool', 'input', 'run-state', 'blueprint-started'].includes(event.kind)) {
       record.events.push(event);
       if (record.events.length > 160) record.events.splice(0, record.events.length - 160);
     }
@@ -2705,20 +2743,169 @@ export function createWorkSessionUi({
     if (stageSyncTimer) { clearTimeout(stageSyncTimer); stageSyncTimer = 0; }
   }
 
+  const autoOpenedBlueprints = new Set();
+
+  async function executeBlueprintForRun(record, canvasId, text = '按当前蓝图开始执行') {
+    const ticket = version;
+    const saved = await dock?.ensureCanvasSaved?.(canvasId);
+    if (saved === false) return false;
+    const result = await api(`/api/dimension/work/runs/${encodeURIComponent(record.id)}/execute-blueprint`, {
+      method: 'POST',
+      body: JSON.stringify({
+        canvasId,
+        text,
+        requestId: `exec-bp:${record.id}:${record.attempt}:${crypto.randomUUID().slice(0, 8)}`,
+      }),
+    });
+    if (ticket === version && result?.run) {
+      dock?.setCanvasWorkLink?.({
+      workRunId: record.id,
+      groupId: record.groupId || '',
+      groupMemberIds: record.groupId ? (groupMembersOf?.() || []) : [],
+      canvasId,
+      readyToStart: false,
+      executing: true,
+    });
+      merge({ runs: [result.run] });
+    }
+    return true;
+  }
+
+  async function convertRunToBlueprint(record) {
+    const ticket = version;
+    const result = await api(`/api/dimension/work/runs/${encodeURIComponent(record.id)}/to-blueprint`, {
+      method: 'POST',
+      body: '{}',
+    });
+    if (ticket !== version) return null;
+    if (result?.run) merge({ runs: [result.run] });
+    const cid = result?.graph?.id || result?.run?.routePlan?.blueprintCanvasId;
+    if (cid) {
+      const updated = records.find(r => r.id === record.id) || result.run || record;
+      await dock?.openCanvasGraph?.(cid, {
+        workRunId: updated.id,
+        groupId: updated.groupId || '',
+        groupMemberIds: updated.groupId ? (groupMembersOf?.() || []) : [],
+        canvasId: cid,
+        readyToStart: updated.planPhase === 'ready' && updated.status === 'completed',
+        executing: false,
+        onExecute: id => executeBlueprintForRun(updated, id),
+      });
+    }
+    return cid || null;
+  }
+
   function syncPlanButton(view, record) {
-    let button = view.root.querySelector('[data-action="approve-work-plan"]');
-    if (record.status !== 'completed' || record.planPhase !== 'ready') {
-      button?.remove();
+    let holder = view.root.querySelector('[data-action="work-plan-actions"]');
+    const legacyBtn = view.root.querySelector('[data-action="approve-work-plan"]');
+    if (!['completed','interrupted'].includes(record.status) || record.planPhase !== 'ready') {
+      holder?.remove();
+      legacyBtn?.remove();
       return;
     }
+    const rp = record.routePlan || {};
+    const bpId = String(rp.blueprintCanvasId || '').trim();
     const attempt = String(record.attempt);
-    if (button?.dataset.planAttempt === attempt) return;
-    button?.remove();
-    button = el('button', 'claude-bar-btn is-accent', '按此计划开始');
+    const sig = `${attempt}:${bpId}:${rp.blueprintNodeCount || 0}:${rp.blueprintEdgeCount || 0}`;
+    if (holder?.dataset.planSig === sig) return;
+    holder?.remove();
+    legacyBtn?.remove();
+
+    const makeLinkCtx = () => ({
+      workRunId: record.id,
+      groupId: record.groupId || '',
+      groupMemberIds: record.groupId ? (groupMembersOf?.() || []) : [],
+      canvasId: bpId,
+      readyToStart: true,
+      executing: false,
+      onExecute: id => executeBlueprintForRun(record, id),
+    });
+
+    if (bpId) {
+      // Rich DimensionImage Blueprint Plan Card (Group auto-blueprint OR Solo converted blueprint)
+      holder = el('div', 'work-blueprint-plan-card');
+      holder.dataset.action = 'work-plan-actions';
+      holder.dataset.planSig = sig;
+
+      const head = el('div', 'work-bp-head');
+      const titleRow = el('div', 'work-bp-title-row');
+      titleRow.append(
+        el('span', 'work-bp-badge', '📐 协同蓝图已绘就'),
+        el('strong', 'work-bp-name', rp.blueprintName || 'DimensionImage 协同蓝图')
+      );
+      const stats = el('span', 'work-bp-stats',
+        `${rp.blueprintNodeCount || 0} 个步骤 · ${rp.blueprintEdgeCount || 0} 条连线`);
+      head.append(titleRow, stats);
+
+      const desc = el('p', 'work-bp-desc',
+        '已在右侧「蓝图」排好成员、模型与流向；你可以直接拖拽连线、更换任意节点的 Bot 或模型/CLI，开工时以蓝图最新保存为准。');
+
+      const chips = el('div', 'work-bp-chips');
+      const nodes = Array.isArray(rp.blueprintNodes) ? rp.blueprintNodes : [];
+      for (const nd of nodes.slice(0, 8)) {
+        const chip = el('span', 'work-bp-chip');
+        const actor = nd.botName || nd.title || nd.id;
+        const mdl = nd.engineKind === 'cli'
+          ? `CLI:${nd.cliEngineId || 'auto'} / ${nd.model || '由 CLI 选择'}`
+          : (nd.model || '');
+        chip.textContent = mdl ? `${actor} · ${mdl}` : actor;
+        chips.append(chip);
+      }
+
+      const actions = el('div', 'work-bp-actions');
+      const editBtn = el('button', 'claude-bar-btn work-bp-edit-btn', '调整分配');
+      editBtn.type = 'button';
+      editBtn.dataset.action = 'open-work-blueprint';
+      editBtn.onclick = () => void dock?.openCanvasGraph?.(bpId, makeLinkCtx());
+
+      const startBtn = el('button', 'claude-bar-btn is-accent work-bp-start-btn', record.status === 'interrupted' ? '确认后重跑蓝图' : record.groupId ? '按当前分配开始' : '按当前蓝图开始');
+      startBtn.type = 'button';
+      startBtn.dataset.action = 'approve-work-blueprint';
+      startBtn.onclick = async () => {
+        startBtn.disabled = true;
+        try {
+          await executeBlueprintForRun(record, bpId);
+        } catch (error) {
+          startBtn.disabled = false;
+          showNotice(error.message || '按蓝图开工失败，请检查蓝图结构后重试');
+          void refresh();
+        }
+      };
+
+      actions.append(startBtn, editBtn);
+      if (record.groupId) {
+        const manual = el('button','claude-bar-btn','我来分配');
+        manual.type='button';
+        manual.onclick=()=>void dock?.openCanvasGraph?.(bpId,{...makeLinkCtx(),manualAssignment:true});
+        actions.append(manual);
+      }
+      holder.append(head, desc);
+      if (chips.childElementCount) holder.append(chips);
+      holder.append(actions);
+      view.root.querySelector('.claude-timeline')?.after(holder);
+      requestAnimationFrame(() => {
+        const sc = getTranscript();
+        if (sc) sc.scrollTop = sc.scrollHeight;
+      });
+
+      // Auto-reveal right-side DimensionImage Blueprint once when lead finishes drawing a group blueprint
+      const autoKey = `${record.id}:${attempt}:${bpId}`;
+      if (record.groupId && focusedRootId === record.id && !autoOpenedBlueprints.has(autoKey)) {
+        autoOpenedBlueprints.add(autoKey);
+        void dock?.openCanvasGraph?.(bpId, makeLinkCtx(), { automatic: true });
+      }
+      return;
+    }
+
+    // Solo Work default plan bar: Keep "按此计划开始" + optional "📐 转成蓝图微调"
+    holder = el('div', 'work-plan-btn-row');
+    holder.dataset.action = 'work-plan-actions';
+    holder.dataset.planSig = sig;
+
+    const button = el('button', 'claude-bar-btn is-accent', '按此计划开始');
     button.type = 'button';
     button.dataset.action = 'approve-work-plan';
     button.dataset.planAttempt = attempt;
-    view.root.querySelector('.claude-timeline')?.after(button);
     button.onclick = async () => {
       button.disabled = true;
       const ticket = version;
@@ -2736,6 +2923,22 @@ export function createWorkSessionUi({
         }
       }
     };
+
+    const toBpBtn = el('button', 'claude-bar-btn', '📐 转成蓝图微调');
+    toBpBtn.type = 'button';
+    toBpBtn.dataset.action = 'convert-plan-blueprint';
+    toBpBtn.onclick = async () => {
+      toBpBtn.disabled = true;
+      try {
+        await convertRunToBlueprint(record);
+      } catch (error) {
+        toBpBtn.disabled = false;
+        showNotice(error.message || '转换为蓝图失败');
+      }
+    };
+
+    holder.append(button, toBpBtn);
+    view.root.querySelector('.claude-timeline')?.after(holder);
   }
 
   function syncStage() {
@@ -3219,6 +3422,26 @@ export function createWorkSessionUi({
     retrySubmission = { key, id: requestId };
     const cursors = Object.fromEntries([...rootViews].map(([id, v]) => [id, v.lastSeq]));
 
+    const isPlanConfirmPhrase = Boolean(
+      isContinuingFinished && focusedRec.planPhase === 'ready' && !quote &&
+      /^(开始|开始吧|开始做|开始做吧|开工|执行|执行吧|按这个做|按这个方案做|按蓝图开始|按当前蓝图开工|按此计划开始执行|按此计划开始|按计划执行|可以|同意|确认执行)[。！!]?$/u.test(text.trim())
+    );
+    const bpId = String(focusedRec?.routePlan?.blueprintCanvasId || '').trim();
+    if (isPlanConfirmPhrase && bpId) {
+      const saved = await dock?.ensureCanvasSaved?.(bpId);
+      if (saved === false) return { ok: false };
+      const result = await api(`/api/dimension/work/runs/${encodeURIComponent(focusedRec.id)}/execute-blueprint`, {
+        method: 'POST',
+        body: JSON.stringify({ canvasId: bpId, text, requestId }),
+      });
+      if (retrySubmission?.id === requestId) retrySubmission = null;
+      if (ticket === version && result?.run) {
+        merge({ runs: [result.run] });
+        onChange();
+      }
+      return result;
+    }
+
     const endpoint = isContinuingFinished
       ? `/api/dimension/work/runs/${encodeURIComponent(focusedRec.id)}/resume`
       : '/api/dimension/work/runs';
@@ -3226,9 +3449,8 @@ export function createWorkSessionUi({
     const result = await api(endpoint, {
       method: 'POST',
       body: JSON.stringify({ ...scope, text, quote, deliveryMode, requestId, cursors,
-        ...(isContinuingFinished && focusedRec.planPhase === 'ready' && !quote &&
-          /^(开始|开始吧|开始做|开始做吧|执行|执行吧|按这个做|按这个方案做|按此计划开始执行|按此计划开始|按计划执行|可以|同意|确认执行)[。！!]?$/u.test(text.trim())
-          ? {planAttempt:String(focusedRec.attempt)} : {}) }),
+        ...(!isContinuingFinished && scope.groupId ? { blueprintRouting: true } : {}),
+        ...(isPlanConfirmPhrase ? { planAttempt: String(focusedRec.attempt) } : {}) }),
     });
 
     if (retrySubmission?.id === requestId) retrySubmission = null;

@@ -19,13 +19,15 @@ await writeFile(path.join(npm,'qwen.cmd'), [
   ':model','>native-model.txt echo %~2','echo {"type":"result","result":"fixture complete"}','exit /b 0'
 ].join('\r\n'));
 const nativeEntry={engineId:'qwen-code',providerId:'',model:'qwen3-max'};
+await writeFile(path.join(npm,'hermes.cmd'),await readFile(path.join(npm,'qwen.cmd')));
+const providerNativeEntry = { ...nativeEntry, engineId: 'hermes', providerId: 'native-fixture', custom: true };
 const ranked='claude-opus-4-6-thinking-auto-high-effort', middle='local-standard', calls=[];
 let counter=0;
 const server=http.createServer(async(req,res)=>{
   if(req.method==='GET'){res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({data:[middle,ranked,'catalog-only'].map(id=>({id}))}));return;}
   let text='';for await (const chunk of req)text+=chunk;
-  const body=JSON.parse(text),lead=body.tools?.some(t=>t.function?.name==='delegate_work');
-  calls.push({lead,body});
+  const body=JSON.parse(text),lead=body.tools?.some(t=>t.function?.name==='delegate_work'),soloCommander=!lead && body.tools?.some(t=>t.function?.name==='dispatch_native_cli');
+  calls.push({lead,soloCommander,body});
   if(lead && body.messages.some(m=>m.role==='user' && m.content==='HOLD_ROUTE')){
     res.writeHead(503);res.end();return;
   }
@@ -41,12 +43,17 @@ const server=http.createServer(async(req,res)=>{
   if(typeof poolCase==="string" && poolCase.includes("NATIVE_ROUTE")) args.jobs[0].poolModel=nativeEntry;
   if(body.messages.some(m=>m.role==='user' && m.content==='MULTI_APPROVAL')){
     args.jobs=[
-      {id:'first',botId:'dispatch-member',text:'校验编码',routeReason:'执行编码',poolModel:nativeEntry},
+      {id:'first',botId:'dispatch-member',text:'校验编码',routeReason:'执行编码',poolModel:providerNativeEntry},
       {id:'second',botId:'dispatch-review',text:'审查设计',routeReason:'独立审查',poolModel:{providerId:'dispatch',model:'catalog-only'}},
     ];
   }
+  if(body.messages.some(m=>m.role==='user' && m.content==='SPECIALTY_PLAN')){
+    args.jobs=[{id:'specialist',botId:'dispatch-member',text:'设计前端接口',specialty:'frontend',acceptance:'提供接口清单'}];
+  }
   const picking=body.messages.some(m=>m.role==='system' && m.content?.startsWith('你负责模型分配'));
-  const delta=picking?{content:JSON.stringify(args)}:lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:{content:body.tools?.length?'已处理。':'先确定节日内容，再实现并测试。是否按此计划开始执行？'};
+  const review=body.messages.some(m=>m.role==='system' && m.content?.startsWith('你是群主，审查刚刚交付'));
+  const blocked=review && body.messages.some(m=>m.content?.includes('BLOCK_REVIEW'));
+  const delta=review?{content:JSON.stringify({pass:!blocked,reason:blocked?'缺少浏览器验收':'已检查文本交付'})}:picking?{content:JSON.stringify(args)}:lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:soloCommander&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'solo-cli-'+(++counter),type:'function',function:{name:'dispatch_native_cli',arguments:JSON.stringify({task:'按已确认计划实现并验证节日插件'})}}]}:{content:body.tools?.length?'已处理。':'先确定节日内容，再实现并测试。是否按此计划开始执行？'};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   res.end('data: '+JSON.stringify({choices:[{index:0,delta,finish_reason:delta.tool_calls?'tool_calls':'stop'}]})+'\n\ndata: [DONE]\n\n');
 });
@@ -94,8 +101,6 @@ try{
   assert.equal(duplicate.run.attempt,discussionRun.attempt+1);
   const approved=calls.slice(approvedAt).find(x=>x.lead);
   assert(approved?.body.messages.some(m=>m.content===idea),'authorized execution must keep the original idea');
-  const finishedIdea=await settled(discussionId);
-  for(const job of finishedIdea.assignments) if(job.runId) await settled(job.runId);
   console.log('PASS discussion, requirements follow-up, quoted confirmation and explicit start');
   for(const test of ['DIRECT_CASE','DELEGATE_CASE','UPGRADE_CASE','INVALID_CASE','POOL_PICK','POOL_DENIED']){
     const poolTest=test.startsWith('POOL_'), denied=test==='INVALID_CASE'||test==='POOL_DENIED';
@@ -116,7 +121,7 @@ try{
       if(saved.terminal && (denied || saved.assignments.some(a=>a.actualRoute?.model===expected) && calls.slice(before).some(r=>!r.lead && r.body.tools?.length > 0 && r.body.model===expected)))break;
       await new Promise(r=>setTimeout(r,180));
     }
-    const seen=calls.slice(before),lead=seen.find(r=>r.lead && r.body.messages.some(m=>m.role==='user' && m.content.includes(test)));
+    const seen=calls.slice(before),lead=seen.find(r=>r.lead && r.body.messages.some(m=>m.role==='user' && m.content==='直接做，不用先出计划：'+test+' 只返回文本'));
     assert(lead,JSON.stringify(saved).slice(-1200));
     assert(lead.body.messages.some(m=>m.role==='system'&&m.content.includes(ranked)&&m.content.includes('accountAccess')),'missing coordinator inventory');
     if(denied){assert.equal(seen.filter(r=>!r.lead && r.body.tools?.length > 0).length,0);assert.equal(saved.assignments.length,0);continue;}
@@ -166,7 +171,7 @@ try{
   const inventory=await api('/api/dimension/work-models');
   assert(inventory.cliModels.some(m=>m.engineId===nativeEntry.engineId && m.model===nativeEntry.model));
   const custom={...nativeEntry,model:'private-version',custom:true};
-  const mixed=[{providerId:'dispatch',model:'catalog-only'},custom,nativeEntry];
+  const mixed=[{providerId:'dispatch',model:'catalog-only'},custom,nativeEntry,providerNativeEntry];
   assert.deepEqual((await api('/api/dimension/work-models',{...inventory.settings,pool:mixed},'PUT')).settings.pool,mixed);
   await assert.rejects(api('/api/dimension/work-models',{...inventory.settings,pool:[{...custom,engineId:'unknown-cli'}]},'PUT'));
   const nativeRun=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'直接做，不用先出计划：NATIVE_ROUTE 只返回文本',requestId:'native'})).run;
@@ -185,6 +190,12 @@ try{
   const published=await settled(multi.id);
   assert.equal(published.planPhase,'ready');
   assert.equal(published.assignments.length,0);
+  const library = await api('/api/dimension/canvas/library');
+  const blueprint = library.canvases.find(g => g.id === published.routePlan.blueprintCanvasId);
+  const nativeNode = blueprint?.nodes.find(n => n.botId === 'dispatch-member');
+  assert.equal(nativeNode?.cliModelSource, 'native');
+  assert.equal(nativeNode.cliNativeProvider, providerNativeEntry.providerId);
+  assert.equal(nativeNode.cliNativeModel, providerNativeEntry.model);
   assert(published.answer.includes(nativeEntry.model) && published.answer.includes('catalog-only'));
   await api('/api/dimension/work/runs/'+multi.id+'/resume',{text:'开始',planAttempt:String(published.attempt),requestId:'multi-go'});
   let actual;
@@ -201,5 +212,60 @@ try{
     assert.equal(child.assignedRoute.cli?.model,expected.cli?.model);
   }
   console.log('PASS confirmed two-member mixed CLI/API assignment matches actual routes');
+  await settled(multi.id);
+  const manual = {providerId:'dispatch',model:middle,specialties:['frontend'],manualOnly:true};
+  const specialist = {providerId:'dispatch',model:'catalog-only',specialties:['frontend'],costTier:'standard'};
+  const profiles = [manual,{...nativeEntry,costTier:'low'},specialist];
+  const prefs = await api('/api/dimension/work-models',{...inventory.settings,routingPreference:'quality',pool:profiles},'PUT');
+  assert.deepEqual(prefs.settings.pool,profiles);
+  await assert.rejects(api('/api/dimension/work-models',{...prefs.settings,pool:[{...manual,specialties:['invalid']}]},'PUT'));
+  const draft=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'SPECIALTY_PLAN',requestId:'specialty-plan'})).run;
+  const plan=await settled(draft.id);
+  assert.equal(plan.routePlan.assignments.job1.model,specialist.model);
+  const graph=(await api('/api/dimension/canvas/library')).canvases.find(g=>g.id===plan.routePlan.blueprintCanvasId);
+  const node=graph.nodes.find(n=>n.id==='job1');
+  assert(node.prompt.includes('提供接口清单'));
+  node.model=manual.model;
+  node.assignmentLocked=true;
+  node.requiresWorkspace=true;
+  await api('/api/dimension/canvas/save',graph);
+  const start='/api/dimension/work/runs/'+draft.id+'/execute-blueprint';
+  await assert.rejects(api(start,{canvasId:graph.id,requestId:'invalid-capability'}));
+  node.requiresWorkspace=false;
+  node.model='off-pool';
+  await api('/api/dimension/canvas/save',graph);
+  await assert.rejects(api(start,{canvasId:graph.id,requestId:'invalid-model'}));
+  node.model=manual.model;
+  await api('/api/dimension/canvas/save',graph);
+  const offset=calls.length;
+  await api(start,{canvasId:graph.id,requestId:'confirmed-override'});
+  const executed=await settled(draft.id);
+  assert.equal(executed.status,'completed',JSON.stringify(executed.events).slice(-1500));
+  assert(calls.slice(offset).some(call=>call.body.model===manual.model && JSON.stringify(call.body.messages).includes('提供接口清单')));
+  const runs=await api('/api/dimension/canvas/runs');
+  const cr=runs.runs.find(r=>r.canvasId===graph.id);
+  const state=(await api('/api/dimension/canvas/runs/'+cr.runId)).run.nodes.job1;
+  assert.equal(state.plannedRoute,'API / dispatch / '+manual.model);
+  assert.equal(state.modelLabel,'dispatch / '+manual.model);
+  assert(executed.events.some(e=>e.blueprintStep?.status==='review_passed'));
+  node.prompt+=' BLOCK_REVIEW';
+  await api('/api/dimension/canvas/save',graph);
+  await api(start,{canvasId:graph.id,requestId:'reject-handoff'});
+  const paused=await settled(draft.id);
+  assert.equal(paused.status,'interrupted');
+  assert.equal(paused.planPhase,'ready');
+  assert(paused.error.includes('执行组合已锁定'));
+  assert(paused.events.some(e=>e.blueprintStep?.status==='review_blocked'));
+  const blockedRun=(await api('/api/dimension/canvas/runs')).runs.find(r=>r.canvasId===graph.id);
+  assert.equal(blockedRun.nodes['bp-lead-final'].iteration,0);
+  assert(blockedRun.nodes.job1.output);
+  const kept=(await api('/api/dimension/canvas/library')).canvases.find(g=>g.id===graph.id).nodes.find(n=>n.id===node.id);
+  assert(kept.assignmentLocked && kept.model===manual.model);
+  console.log('PASS owner review blocks downstream delivery and preserves locked selection and partial output');
+  await api('/api/dimension/work-models',{...prefs.settings,routingPreference:'economy'},'PUT');
+  const economy=(await api('/api/dimension/work/runs',{botId:'dispatch-lead',groupId:gid,text:'SPECIALTY_PLAN',requestId:'economy-plan'})).run;
+  const cheaper=await settled(economy.id);
+  assert.equal(cheaper.routePlan.assignments.job1.cli?.model,nativeEntry.model);
+  console.log('PASS profile routing, economy preference, manual override, hard constraints and saved execution receipt');
   console.log('PASS both dispatch paths and unconfigured route refusal');
 }finally{if(app)await app.stop();server.closeAllConnections();await new Promise(r=>server.close(r));}

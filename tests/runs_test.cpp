@@ -1465,6 +1465,62 @@ void resumed_delivery(const std::filesystem::path& root) {
     CHECK(receipts.back().at("execution").at("verification").as_string() == "final checked");
 }
 
+void blueprint_routing_bind_and_execute(const std::filesystem::path& root) {
+    auto callbacks = base_callbacks();
+    std::string received_canvas_id;
+    bool received_auto = false;
+    callbacks.model = [](const auto&, const auto&, const auto&, ModelChunk, std::stop_token) {
+        return text_reply("拟定协作计划如下。\n\n是否按此计划开始执行？");
+    };
+    callbacks.propose_routes = [](const RunExecutionContext& ctx, const ModelRoute&, const auto&, const auto&, std::stop_token) {
+        return Json::Object{
+            {"blueprintCanvasId", "grp-bp-" + ctx.run_id},
+            {"blueprintName", "群聊蓝图测试"},
+            {"report", "已绘好蓝图"},
+            {"lead", Json::Object{{"providerId", "p"}, {"model", "m"}}},
+            {"jobs", Json::Array{}},
+        };
+    };
+    callbacks.execute_blueprint = [&](const RunExecutionContext&, const Json& plan, std::stop_token) {
+        BlueprintRunResult r;
+        received_canvas_id = plan.find("blueprintCanvasId") ? plan.at("blueprintCanvasId").as_string() : "";
+        received_auto = plan.find("autoBlueprint") && plan.at("autoBlueprint").as_bool();
+        r.ok = true;
+        r.response = "蓝图最终交付结果：" + (received_canvas_id.empty() ? "auto" : received_canvas_id);
+        r.artifacts = {"deliverables/blueprint-out.md"};
+        return r;
+    };
+    RunService service(root, callbacks);
+    // 1. Group plan -> ready -> bind updated blueprint -> resume_blueprint executes blueprint & delivers artifacts
+    const auto sub = service.submit("lead-bot", "grp-1", "请规划一个蓝图任务", "bp-req-1", false, {}, {}, true);
+    const auto ready = settled(service, sub.run_id);
+    CHECK(status(ready) == "completed");
+    CHECK(ready.at("planPhase").as_string() == "ready");
+    const std::string cid = ready.at("routePlan").at("blueprintCanvasId").as_string();
+    CHECK(cid == "grp-bp-" + sub.run_id);
+
+    (void)service.bind_blueprint(sub.run_id, Json::Object{{"blueprintNodeCount", 4}});
+    CHECK(service.brief_json(sub.run_id).at("routePlan").at("blueprintNodeCount").as_number() == 4);
+
+    (void)service.resume_blueprint(sub.run_id, "bp-exec-1", cid, "按当前蓝图开始执行");
+    const auto done = settled(service, sub.run_id);
+    CHECK(status(done) == "completed");
+    CHECK(received_canvas_id == cid);
+    CHECK(done.at("response").as_string() == "蓝图最终交付结果：" + cid);
+    CHECK(done.at("artifacts").as_array().size() == 1);
+    CHECK(done.at("artifacts").as_array().front().as_string() == "deliverables/blueprint-out.md");
+
+    // 2. Group direct run ("直接做") with autoBlueprint -> skips discussion and runs execute_blueprint immediately
+    received_canvas_id.clear();
+    received_auto = false;
+    const auto direct = service.submit("lead-bot", "grp-1", "直接做，不用先出计划：立即交付", "bp-direct-1",
+                                       false, {}, Json::Object{{"autoBlueprint", true}}, true);
+    const auto direct_done = settled(service, direct.run_id);
+    CHECK(status(direct_done) == "completed");
+    CHECK(received_auto);
+    CHECK(direct_done.at("response").as_string() == "蓝图最终交付结果：auto");
+}
+
 } // namespace
 
 #ifdef _WIN32
@@ -1531,6 +1587,7 @@ int main(int argc, char** argv) {
             work_compaction_lifecycle(root / (std::string("work-compaction-") + scenario), scenario);
         provider_context_telemetry(root / "chat-context-reported", true);
         provider_context_telemetry(root / "chat-context-unknown", false);
+        blueprint_routing_bind_and_execute(root / "blueprint-routing");
         std::cout << "runs tests passed (injected models/tools, private conversation export, repeatable completed builds, real worker threads and crash recovery)\n";
         return 0;
     } catch (const std::exception& error) {

@@ -1,0 +1,28 @@
+{
+  "packageId": "token-rumble",
+  "name": "算力牌局 · Token Rumble",
+  "version": "2.5.0",
+  "games": [
+    {
+      "id": "tr-token-rumble",
+      "code": "TR-01",
+      "packageId": "token-rumble",
+      "title": "算力牌局 · Token Rumble",
+      "subtitle": "2v2 / 4P / 6P AI 娘卡牌桌游 · 28 种原创手牌",
+      "description": "v2.5 豪华扩展版！支持 4 人暗身份、2v2 搭档协同与 6 人大局三大模式，内含 8 位 AI 娘双技能、28 种原创手牌（92 张牌库）、10 种全局系统事件、真人发牌节奏、接待模型真参战决策、完整图鉴/战绩与音效飞牌动效。",
+      "channel": "A",
+      "theme": "violet",
+      "players": 4,
+      "maxCompanions": 3,
+      "multiplayer": true,
+      "sandboxInstalled": true,
+      "source": "bundled_sandbox",
+      "entryPath": "index.html",
+      "entryQuery": "embed=1",
+      "entryUrl": "/dimension-ui/playground-sandbox/token-rumble/index.html?embed=1",
+      "coverUrl": "/dimension-ui/playground-sandbox/token-rumble/art/cover.webp",
+      "defaultRole": "opponent",
+      "defaultBotIds": ["ai-claude", "ai-gemini", "ai-grok"]
+    }
+  ]
+}

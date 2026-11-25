@@ -1,25 +1,60 @@
-/** Shared software library; each bot has a separate live desktop and browser profile. */
-export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
+/** Shared software library; each bot has a separate live desktop and browser profile.
+ * Supports both embedded Work Browser tab mode and pop-out modal dialog mode.
+ */
+export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace, onRequestEmbed, onRequestCloseEmbed } = {}) {
   const dialog = document.createElement('dialog');
   dialog.className = 'linux-desktop-dialog';
-  dialog.innerHTML = `<header class="ld-head"><strong>Linux 工作桌面</strong><select class="ld-bot" aria-label="查看哪个 Bot 的桌面"></select><button type="button" class="ld-close" aria-label="关闭桌面预览">关闭预览</button></header>
+  document.body.appendChild(dialog);
+
+  const surface = document.createElement('div');
+  surface.className = 'ld-surface';
+  surface.innerHTML = `<header class="ld-head"><strong>Linux 工作桌面</strong><select class="ld-bot" aria-label="查看哪个 Bot 的桌面"></select><button type="button" class="ld-popout" title="在独立大窗与侧栏标签页之间切换">独立大窗</button><button type="button" class="ld-close" aria-label="关闭桌面预览">关闭预览</button></header>
     <section class="ld-toolbar"><select class="ld-app" aria-label="公共软件"></select><button type="button" class="ld-launch">启动软件</button><button type="button" class="ld-control">接管键鼠</button><button type="button" class="ld-stop">关闭桌面</button><span class="ld-state"></span></section>
-    <div class="ld-workspace"></div><label class="ld-notice"><input type="checkbox" class="ld-network"> 允许当前 Bot 联网</label><p class="ld-notice">软件由所有 Bot 共用，桌面、登录状态和工作区各自独立。可以直接让 Bot 安装软件，安装后自动加入公共清单。</p>
+    <div class="ld-meta-row"><div class="ld-workspace"></div><label class="ld-notice ld-network-wrap"><input type="checkbox" class="ld-network"> 允许当前 Bot 联网</label></div>
+    <p class="ld-notice ld-hint">软件由所有 Bot 共用，桌面、登录状态和工作区各自独立。可以直接让 Bot 安装软件，安装后自动加入公共清单。</p>
     <div class="ld-screen-wrap"><img class="ld-screen" alt="Bot 的 Linux 桌面" tabindex="0" draggable="false" hidden><div class="ld-empty">启动公共软件后，这里显示该 Bot 的独立桌面。</div></div>
     <div class="ld-input"><textarea class="ld-text" rows="1" placeholder="接管后，可在这里输入中文或长文本，再粘贴到远程软件" aria-label="远程输入文本"></textarea><button type="button" class="ld-paste">粘贴到桌面</button><button type="button" class="ld-enter">Enter</button></div>
     <details class="ld-library"><summary>公共软件设置 · 所有 Bot 可调用</summary><p>登记已安装在 Linux 中的软件。Chrome 已预设；新增软件时填写程序路径。</p><div class="ld-software-rows"></div><div class="ld-software-add"><input class="ld-new-name" placeholder="软件名称" aria-label="软件名称"><input class="ld-new-path" placeholder="/usr/bin/软件程序" aria-label="Linux 程序路径"><button type="button" class="ld-add">添加公共软件</button></div></details>
     <div class="ld-installations" role="status" hidden></div><div class="ld-error" role="status"></div>`;
-  document.body.appendChild(dialog);
-  const el = (selector) => dialog.querySelector(selector);
+  dialog.appendChild(surface);
+
+  const el = (selector) => surface.querySelector(selector);
+  let mode = 'closed'; // 'closed' | 'embedded' | 'dialog'
+  let embedHost = null;
   let botId = '', apps = [], frame = null, human = false, running = false, busy = false, timer = null, generation = 0, pending = 0, refreshing = false;
   let queue = Promise.resolve();
   let streaming = false, previewAvailable = false, desktopId = null;
   const controlledBots = new Set();
+
   const url = (part = '', target = botId) => target.startsWith('app:')
     ? `/api/dimension/app-bridge/apps/${encodeURIComponent(target.slice(4))}/desktop${part}`
     : `/api/dimension/work/desktops/${encodeURIComponent(target)}${part}`;
-  const current = (target, version) => dialog.open && target === botId && version === generation;
+
+  const isActive = () => {
+    if (mode === 'dialog') return dialog.open;
+    if (mode === 'embedded') return Boolean(embedHost && embedHost.isConnected && !embedHost.hidden);
+    return false;
+  };
+  const current = (target, version) => isActive() && target === botId && version === generation;
   const error = (e) => { el('.ld-error').textContent = e?.message || String(e || ''); };
+
+  const syncModeChrome = () => {
+    const isEmb = mode === 'embedded';
+    surface.classList.toggle('is-embedded', isEmb);
+    const popBtn = el('.ld-popout');
+    const closeBtn = el('.ld-close');
+    if (popBtn) {
+      const canToggle = Boolean(onRequestEmbed) && !botId.startsWith('app:');
+      popBtn.hidden = !canToggle;
+      popBtn.textContent = isEmb ? '独立大窗' : '回到侧栏';
+      popBtn.title = isEmb ? '弹出独立大窗查看（适合高分辨率精细操作）' : '切回右侧 Work 内置浏览器标签页';
+    }
+    if (closeBtn) {
+      closeBtn.hidden = isEmb && !onRequestCloseEmbed;
+      closeBtn.textContent = isEmb ? '切回默认页' : '关闭预览';
+    }
+  };
+
   const controls = () => {
     el('.ld-bot').disabled = busy;
     el('.ld-control').textContent = human ? (botId.startsWith('app:') ? '恢复自动操作' : '交还给 Bot') : '接管键鼠';
@@ -30,7 +65,9 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
     el('.ld-enter').disabled = !human || busy;
     el('.ld-screen').classList.toggle('is-controlled', human);
     el('.ld-state').textContent = (!running ? '桌面未启动' : human ? '你正在接管 · 自动操作已暂停' : '自动控制 · 当前为观看模式') + (streaming ? ' · 30 帧预览' : '');
+    syncModeChrome();
   };
+
   // Input remains ordered; the continuous preview uses a separate connection.
   const enqueue = (job) => {
     const result = queue.then(job);
@@ -77,7 +114,7 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
     controls();
   };
   const startStream = () => {
-    if (streaming || !previewAvailable || !running || !dialog.open || document.hidden) return;
+    if (streaming || !previewAvailable || !running || !isActive() || document.hidden) return;
     streaming = true;
     el('.ld-screen').src = url('/stream') + `?view=${generation}&t=${Date.now()}`;
     el('.ld-screen').hidden = false; el('.ld-empty').hidden = true;
@@ -100,11 +137,11 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
   const action = (payload, before = () => {}) => {
     bufferedInput = null;
     return run(async (target, version) => {
-    before();
-    if (payload.op === 'launch') controlledBots.add(target);
-    const data = await api(url('/action', target), { method: 'POST', body: JSON.stringify({ action: { ...payload, observationId: frame?.observationId }, fastInput: streaming }) });
-    rememberControl(target, data);
-    if (current(target, version)) { showFrame(data); error(''); }
+      before();
+      if (payload.op === 'launch') controlledBots.add(target);
+      const data = await api(url('/action', target), { method: 'POST', body: JSON.stringify({ action: { ...payload, observationId: frame?.observationId }, fastInput: streaming }) });
+      rememberControl(target, data);
+      if (current(target, version)) { showFrame(data); error(''); }
     });
   };
   let bufferedInput = null;
@@ -152,11 +189,23 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
     await api(url('/control', target), { method: 'POST', body: JSON.stringify({ human: false }) });
     controlledBots.delete(target);
   };
-  const open = async (library = false, targetBotId = '') => {
-    if (dialog.open) return;
-    generation++; botId = targetBotId || getBotId(); resetView();
+
+  const stopSession = ({ keepControl = false } = {}) => {
+    const previous = botId;
+    generation++;
+    clearInterval(timer);
+    timer = null;
+    resetView();
+    if (!keepControl && previous) {
+      void enqueue(() => release(previous)).catch(() => {});
+    }
+  };
+
+  const prepareTarget = (library, targetBotId) => {
+    botId = targetBotId || getBotId();
     const application = botId.startsWith('app:');
     dialog.classList.toggle('is-application', application);
+    surface.classList.toggle('is-application', application);
     el('.ld-head strong').textContent = application ? '公共应用桌面' : 'Linux 工作桌面';
     el('.ld-empty').textContent = application ? '打开应用后，在这里完成登录；关闭预览会自动交还键鼠。' : '启动公共软件后，这里显示该 Bot 的独立桌面。';
     el('.ld-screen').alt = application ? '公共应用的 Linux 桌面' : 'Bot 的 Linux 桌面';
@@ -164,24 +213,107 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
     el('.ld-bot').replaceChildren(...bots.map((b) => new Option(b.name || b.id, b.id)));
     el('.ld-bot').value = botId;
     if (!el('.ld-bot').value) botId = el('.ld-bot').value = bots[0]?.id || '';
-    el('.ld-library').open = library;
+    el('.ld-library').open = Boolean(library);
+  };
+
+  const startPolling = async (version) => {
+    await refresh();
+    if (current(botId, version)) {
+      clearInterval(timer);
+      timer = setInterval(() => { if (!busy && !refreshing && isActive()) void refresh(); }, 1500);
+    }
+  };
+
+  const openModal = async (library = false, targetBotId = '') => {
+    if (mode === 'embedded') {
+      stopSession({ keepControl: true });
+      mode = 'closed';
+      embedHost = null;
+    }
+    if (dialog.open) return;
+    if (surface.parentElement !== dialog) dialog.appendChild(surface);
+    generation++;
+    mode = 'dialog';
+    prepareTarget(library, targetBotId);
+    resetView();
     dialog.showModal();
     const version = generation;
-    await refresh();
-    if (current(botId, version)) timer = setInterval(() => { if (!busy && !refreshing && dialog.open) void refresh(); }, 1500);
+    await startPolling(version);
   };
+
+  const attachEmbedded = async (container, { library = false, targetBotId = '' } = {}) => {
+    if (!container) return;
+    if (dialog.open) {
+      mode = 'closed';
+      dialog.close();
+    }
+    const desiredBot = targetBotId || getBotId();
+    if (mode === 'embedded' && embedHost === container && surface.parentElement === container && botId === desiredBot && isActive()) {
+      if (library) el('.ld-library').open = true;
+      startStream();
+      void refresh();
+      return;
+    }
+    stopSession({ keepControl: false });
+    embedHost = container;
+    if (surface.parentElement !== container) {
+      container.replaceChildren(surface);
+    }
+    generation++;
+    mode = 'embedded';
+    prepareTarget(library, desiredBot);
+    resetView();
+    const version = generation;
+    await startPolling(version);
+  };
+
+  const detachEmbedded = () => {
+    if (mode !== 'embedded') return;
+    mode = 'closed';
+    embedHost = null;
+    stopSession({ keepControl: false });
+  };
+
+  const open = async (library = false, targetBotId = '') => {
+    const resolved = targetBotId || '';
+    const isApp = resolved.startsWith('app:');
+    if (!isApp && onRequestEmbed && onRequestEmbed({ library: Boolean(library), targetBotId: resolved })) {
+      return;
+    }
+    await openModal(library, resolved);
+  };
+
   el('.ld-bot').onchange = async () => {
     if (busy) { el('.ld-bot').value = botId; return; }
     const previous = botId;
     generation++; botId = el('.ld-bot').value; resetView();
     try { await enqueue(() => release(previous)); await refresh(); } catch (e) { error(e); }
   };
-  el('.ld-close').onclick = () => dialog.close();
+  el('.ld-popout').onclick = () => {
+    const activeBot = botId;
+    const libOpen = el('.ld-library').open;
+    if (mode === 'embedded') {
+      void openModal(libOpen, activeBot);
+    } else if (onRequestEmbed) {
+      const keepBot = activeBot;
+      mode = 'closed';
+      dialog.close();
+      onRequestEmbed({ library: libOpen, targetBotId: keepBot });
+    }
+  };
+  el('.ld-close').onclick = () => {
+    if (mode === 'embedded') {
+      detachEmbedded();
+      onRequestCloseEmbed?.();
+    } else {
+      dialog.close();
+    }
+  };
   dialog.addEventListener('close', () => {
-    const previous = botId;
-    generation++; clearInterval(timer); resetView();
-    // Wait for a pending launch/takeover before releasing its captured Bot, even after reopening.
-    void enqueue(() => release(previous)).catch(() => {});
+    if (mode === 'dialog') {
+      mode = 'closed';
+      stopSession({ keepControl: false });
+    }
   });
   el('.ld-launch').onclick = () => action({ op: 'launch', appId: el('.ld-app').value });
   el('.ld-network').onchange = () => run(async (target, version) => {
@@ -210,14 +342,15 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
   };
   el('.ld-paste').onclick = () => action({ op: 'type', text: el('.ld-text').value });
   el('.ld-enter').onclick = () => action({ op: 'press', key: 'Return' });
+
   const image = el('.ld-screen');
   image.onerror = () => {
-    if (!dialog.open || !streaming) return;
+    if (!isActive() || !streaming) return;
     streaming = false; controls();
     // The status timer reconnects a failed stream without adding a second input queue.
   };
   document.addEventListener('visibilitychange', () => {
-    if (!dialog.open) return;
+    if (!isActive()) return;
     if (document.hidden && streaming) { streaming = false; image.removeAttribute('src'); controls(); }
     else if (!document.hidden) { startStream(); void refresh(); }
   });
@@ -250,12 +383,14 @@ export function bindLinuxDesktop({ api, getBotId, getBots, onWorkspace }) {
       input({ op: 'press', key });
     }
   };
-  document.getElementById('linuxDesktopBtn')?.addEventListener('click', () => { void open(); });
-  document.getElementById('sharedSoftwareBtn')?.addEventListener('click', () => { void open(true); });
+
+  document.getElementById('linuxDesktopBtn')?.addEventListener('click', () => { void open(false, ''); });
+  document.getElementById('sharedSoftwareBtn')?.addEventListener('click', () => { void openModal(true, ''); });
   window.addEventListener('dimension-open-desktop', event => { void open(false, event.detail?.botId || ''); });
   window.addEventListener('dimension-open-app-desktop', event => {
     if (!/^[a-z][a-z0-9_-]{0,47}$/.test(event.detail?.appId || '') || dialog.open) return;
-    void open(false, 'app:' + event.detail.appId).then(() => action({ op: 'launch' }));
+    void openModal(false, 'app:' + event.detail.appId).then(() => action({ op: 'launch' }));
   });
-  return { open };
+
+  return { open, openModal, attachEmbedded, detachEmbedded, isEmbedded: () => mode === 'embedded' };
 }

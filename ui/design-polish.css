@@ -290,37 +290,62 @@ body.is-resizing-sidebar .sidebar-resizer {
 }
 
 .sidebar-toolbar {
-  gap: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
 }
 
-/* Segmented Mode Pill: [ 对话 | 工作 ] */
+.sidebar-actions-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 2px;
+}
+
+.sidebar-mode-caption {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-ink-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+/* Segmented Mode Pill: [ 闲谈 | 工坊 | 游乐场 ] */
 .mode-seg-pill {
   position: relative;
-  display: inline-grid;
-  grid-template-columns: 1fr 1fr;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 2px;
   padding: 3px;
   border-radius: 11px;
   background: color-mix(in srgb, var(--color-ink) 6.5%, transparent);
   border: 1px solid var(--color-edge);
-  flex: 1 1 auto;
-  max-width: 148px;
+  width: 100%;
+  max-width: none;
 }
 
 .mode-seg-tab {
-  height: 28px;
-  padding: 0 9px;
+  height: 29px;
+  padding: 0 6px;
   border: 0;
   border-radius: 8px;
   background: transparent;
   color: var(--color-ink-secondary);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
+  min-width: 0;
   white-space: nowrap;
   cursor: pointer;
   transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
@@ -1108,6 +1133,20 @@ body.is-resizing-sidebar .sidebar-resizer {
   --cs-app: #191715;
   --cs-panel: #211e1b;
   --cs-dot: #da7756;
+}
+
+.cs-theme-preview.is-codex {
+  --cs-app: #0d0e11;
+  --cs-panel: #14171f;
+  --cs-dot: #f4f4f5;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.cs-theme-preview.is-codex-light {
+  --cs-app: #ffffff;
+  --cs-panel: #f2f4f7;
+  --cs-dot: #111318;
+  border: 1px solid #dce0e7;
 }
 
 /* Modern Pill Toggle Switches for Settings & Dialog Checkboxes */
@@ -1976,7 +2015,7 @@ body.is-resizing-sidebar .sidebar-resizer {
   box-shadow: var(--shadow-sm), inset 0 1px 0 rgb(255 255 255 / 0.5);
 }
 
-html[data-theme="nightink"] .group-item.active {
+html:is([data-theme="nightink"], [data-theme="codex"]) .group-item.active {
   box-shadow: var(--shadow-sm), inset 0 1px 0 rgb(255 255 255 / 0.06);
 }
 
@@ -2415,8 +2454,8 @@ html[data-theme="nightink"] .atelier-wordmark-halo::before {
    ========================================================================== */
 
 /* Light Warm-Sand User Bubbles in Claude Light & Warm Amber */
-html:not([data-theme="nightink"]) .bubble.user,
-html:not([data-theme="nightink"]) .gmsg.is-user .gmsg-bubble {
+html:not([data-theme="nightink"]):not([data-theme="codex"]) .bubble.user,
+html:not([data-theme="nightink"]):not([data-theme="codex"]) .gmsg.is-user .gmsg-bubble {
   background: var(--color-bubble-user);
   color: var(--color-bubble-user-ink);
   border: 1px solid var(--color-user-work-border);
@@ -2498,11 +2537,17 @@ html:not([data-theme="nightink"]) .gmsg.is-user .gmsg-bubble {
 .star-rail-seats {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 14px;
-  overflow: visible;
-  flex-wrap: wrap;
+  justify-content: safe center;
+  gap: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  max-height: none;
+  scrollbar-width: none;
   padding: 2px 4px;
+}
+.star-rail-seats::-webkit-scrollbar {
+  display: none;
 }
 
 .grok-seat.star-seat,

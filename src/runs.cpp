@@ -328,6 +328,42 @@ ModelTool finish_tool() {
 class RunService::Impl {
 public:
     static constexpr std::string_view confirmation_question = "是否按此计划开始执行？";
+    static constexpr std::string_view confirmation_question_ascii = "是否按此计划开始执行?";
+    // Matches `是否按此计划开始执行？` (or ASCII `?`) near the tail of the reply (within the last 160 bytes),
+    // tolerating Markdown bold/italic, quotes, or persona tail suffixes like `🐾`, `✨`, `～`, `喵`.
+    static std::optional<std::size_t> confirmation_question_offset(std::string_view text) {
+        std::size_t q_pos = text.rfind(confirmation_question);
+        std::size_t q_len = confirmation_question.size();
+        if (q_pos == std::string_view::npos) {
+            q_pos = text.rfind(confirmation_question_ascii);
+            q_len = confirmation_question_ascii.size();
+        }
+        if (q_pos == std::string_view::npos) return std::nullopt;
+        // Must sit at the closing tail of the reply (at most 96 bytes of trailing whitespace/decor/emoji after it,
+        // and no multi-paragraph continuation after the question).
+        const std::string_view tail = text.substr(q_pos + q_len);
+        if (tail.size() > 96 || tail.find("\n\n") != std::string_view::npos) return std::nullopt;
+
+        std::size_t start = q_pos;
+        while (start > 0) {
+            const char c = text[start - 1];
+            if (c == '*' || c == '_' || c == '`' || c == '"' || c == '\'') {
+                --start;
+                continue;
+            }
+            const std::string_view prefix = text.substr(0, start);
+            bool trimmed_utf8 = false;
+            for (std::string_view pre : {"“", "「", "『", "【", "（"}) {
+                if (prefix.ends_with(pre)) {
+                    start -= pre.size();
+                    trimmed_utf8 = true;
+                    break;
+                }
+            }
+            if (!trimmed_utf8) break;
+        }
+        return start;
+    }
     static bool confirms_plan(std::string_view text) {
         const auto first = text.find_first_not_of(" \t\r\n");
         if (first == text.npos) return false;
@@ -335,7 +371,8 @@ public:
         text = text.substr(0, text.find_last_not_of(" \t\r\n") + 1);
         for (std::string_view end : {"。", "！", "!"}) if (text.ends_with(end)) text.remove_suffix(end.size());
         for (std::string_view word : {"开始", "开始吧", "开始做", "开始做吧", "执行", "执行吧", "按这个做",
-                "按这个方案做", "按此计划开始执行", "按此计划开始", "按计划执行", "可以", "同意", "确认执行"})
+                "按这个方案做", "按此计划开始执行", "按此计划开始", "按计划执行", "可以", "可以开始", "同意",
+                "确认", "确认执行", "好的", "好", "行", "没问题", "动手", "动手吧", "干吧", "开干", "ok", "OK"})
             if (text == word) return true;
         return false;
     }
@@ -569,6 +606,10 @@ public:
             throw std::invalid_argument("这份旧方案没有模型分配，请先发送“更新计划”再确认。");
         if (plan_attempt && (plan_attempt != run.attempt || !approves))
             throw std::invalid_argument("计划已更新，请查看当前方案后再确认。");
+        if (approves && !run.group.empty() && callbacks_.has_locked_assignment) {
+            const auto canvas=string_field(run.route_plan,"blueprintCanvasId");
+            if (!canvas.empty() && callbacks_.has_locked_assignment(canvas)) run.route_plan["executionMode"]="blueprint";
+        }
         if (user_work || !run.plan_phase.empty())
             run.plan_phase = approves || skips_plan(text) ? "approved" : "discussion";
         if (!approves) run.route_plan = {};
@@ -582,6 +623,60 @@ public:
         if (!text.empty() || !input_context.is_null()) { run.inputs.push_back({text, request, stamp(), input_context}); ++run.revision; }
         run.messages.push_back({"system", "A new attempt was explicitly requested. Continue from persisted inputs and tool receipts. Never repeat completed external actions. Visual observations are temporary and have been cleared; obtain a fresh screenshot/observe before desktop input.", {}, {}});
         emit(run, "run_resumed", Json::Object{{"requestId", request}, {"input", text}, {"context", input_context}});
+        changed_.notify_all();
+        return submission(run, false, false, false);
+    }
+
+    Json bind_blueprint(const std::string& id, Json blueprint_meta) {
+        std::unique_lock guard(mutex_);
+        ensure_open();
+        auto& run = require(id);
+        if (run.deleted) throw std::invalid_argument("Run has been erased");
+        ensure_hydrated_locked(run);
+        Json::Object merged = run.route_plan.is_object() ? run.route_plan.as_object() : Json::Object{};
+        if (blueprint_meta.is_object()) {
+            for (const auto& [k, v] : blueprint_meta.as_object()) merged[k] = v;
+        }
+        run.route_plan = std::move(merged);
+        run.updated = stamp();
+        save(run);
+        return run.route_plan;
+    }
+
+    RunSubmission resume_blueprint(const std::string& id, const std::string& request,
+                                   const std::string& canvas_id, const std::string& text) {
+        std::unique_lock guard(mutex_);
+        ensure_open();
+        auto& run = require(id);
+        if (run.deleted) throw std::invalid_argument("Run has been erased");
+        if (canvas_id.empty()) throw std::invalid_argument("Blueprint canvasId is required");
+        const std::string display_text = text.empty() ? "按当前蓝图开始执行" : text;
+        validate_input(run.bot, run.group, display_text, request);
+        if (auto* existing = request_run(run.bot, run.group, request)) {
+            if (existing->id != id) throw std::invalid_argument("request_id belongs to another run");
+            return submission(*existing, false, true, false);
+        }
+        if (!terminal(run.status)) throw std::invalid_argument("Only terminal runs can execute a blueprint");
+        if (run.executing) throw std::runtime_error("Run callback is still stopping; retry after it returns");
+        ensure_hydrated_locked(run);
+        Json::Object merged = run.route_plan.is_object() ? run.route_plan.as_object() : Json::Object{};
+        merged["executionMode"] = "blueprint";
+        merged["blueprintCanvasId"] = canvas_id;
+        run.route_plan = std::move(merged);
+        run.plan_phase = "approved";
+        ++run.attempt;
+        run.status = "queued";
+        run.error.clear();
+        run.order = ++order_;
+        run.lifecycle = std::stop_source{};
+        run.model_stop = std::stop_source{};
+        run.screenshot = {};
+        run.requests.push_back(request);
+        run.compaction.last_attempt_digest.clear();
+        request_index_[request_key(run.bot, run.group, request)] = id;
+        run.inputs.push_back({display_text, request, stamp(), {}});
+        ++run.revision;
+        emit(run, "run_resumed", Json::Object{{"requestId", request}, {"input", display_text}, {"context", Json{}}, {"blueprintCanvasId", canvas_id}});
         changed_.notify_all();
         return submission(run, false, false, false);
     }
@@ -607,7 +702,9 @@ public:
         }
         if (run.plan_phase == "approved" && confirms_plan(run.inputs[count-1].text)) {
             for (auto it = run.messages.rbegin(); it != run.messages.rend(); ++it) {
-                if (it->role == "assistant" && it->content.find(confirmation_question) != std::string::npos) {
+                if (it->role == "assistant" &&
+                    (it->content.find(confirmation_question) != std::string::npos ||
+                     it->content.find(confirmation_question_ascii) != std::string::npos)) {
                     task += "\n\n【用户已确认的执行计划】\n" + it->content;
                     break;
                 }
@@ -626,6 +723,20 @@ public:
         return texts;
     }
 
+    Json verified_outputs(const std::string& id) {
+        std::unique_lock guard(mutex_);
+        auto& run = require(id);
+        if (run.deleted) throw std::invalid_argument("Run has been erased");
+        ensure_hydrated_locked(run);
+        Json::Object outputs;
+        for (const auto& receipt : run.receipts) {
+            if (receipt.call.name != "sandbox_exec" || receipt.state != "finished" || receipt.execution.error) continue;
+            const auto* evidence = receipt.execution.metadata.find("verifiedOutputs");
+            if (evidence && evidence->is_object())
+                outputs.insert(evidence->as_object().begin(), evidence->as_object().end());
+        }
+        return outputs;
+    }
     Json get(const std::string& id, bool full) const {
         std::unique_lock guard(mutex_);
         auto& run = const_cast<Impl*>(this)->require(id);
@@ -1854,8 +1965,6 @@ ToolExecution RunService::Impl::resolve_finish(const Run& run, const ToolCall& c
     }
 
     if (!evidence_ids.empty()) {
-        if (!artifacts.empty() || !verification.empty())
-            return {"completion_rejected: use evidenceCallIds OR legacy artifacts+verification, not both.", true};
         std::vector<std::string> resolved_artifacts;
         std::string resolved_verification;
         bool partial_evidence = false;
@@ -1938,6 +2047,70 @@ void RunService::Impl::execute_phase(Run& run, bool& restart) {
             (!options_.conversational_mode && run.messages.front().role != "system"));
         repair_context(run);
         if (!active(run)) return;
+    }
+    bool run_blueprint = false;
+    Json bp_plan;
+    std::stop_token bp_stop;
+    {
+        std::unique_lock guard(mutex_);
+        if (!active(run)) return;
+        const bool explicit_bp = run.route_plan.is_object() &&
+            string_field(run.route_plan, "executionMode") == "blueprint" &&
+            !string_field(run.route_plan, "blueprintCanvasId").empty();
+        const bool auto_bp = !run.group.empty() && run.assigned_route.is_object() &&
+            bool_field(run.assigned_route, "autoBlueprint");
+        if (!discussion && callbacks_.execute_blueprint && (explicit_bp || auto_bp)) {
+            run_blueprint = true;
+            while (run.applied_inputs < run.inputs.size()) {
+                const auto& input = run.inputs[run.applied_inputs];
+                run.messages.push_back({"user", input.context.is_null() ? input.text :
+                    message_with_context(input.text, parse_message_context(input.context)), {}, {}});
+                ++run.applied_inputs;
+            }
+            bp_plan = run.route_plan.is_object() ? run.route_plan : Json(Json::Object{});
+            if (auto_bp && !explicit_bp) {
+                auto obj = bp_plan.as_object();
+                obj["autoBlueprint"] = true;
+                bp_plan = std::move(obj);
+            }
+            bp_stop = run.lifecycle.get_token();
+            save(run);
+        }
+    }
+    if (run_blueprint) {
+        const auto bp_res = callbacks_.execute_blueprint(execution_context, bp_plan, bp_stop);
+        std::unique_lock guard(mutex_);
+        if (!active(run)) return;
+        if (bp_res.cancelled || bp_stop.stop_requested()) {
+            finish(run, "cancelled", bp_res.error.empty() ? "蓝图执行已停止" : bp_res.error);
+            return;
+        }
+        if (bp_res.needs_decision) {
+            run.plan_phase="ready";
+            finish(run,"interrupted",bp_res.error);
+            return;
+        }
+        if (bp_res.ok) {
+            run.response = bp_res.response;
+            if (!run.response.empty()) {
+                run.messages.push_back({"assistant", run.response, {}, {}});
+            }
+            if (!bp_res.artifacts.empty()) {
+                Receipt rc;
+                rc.attempt = run.attempt;
+                rc.call = ToolCall{"blueprint-finish-" + std::to_string(run.attempt), "task_finish", "{}"};
+                rc.fingerprint = rc.call.id;
+                rc.state = "finished";
+                rc.execution.result = Json(Json::Object{{"response", short_text(run.response, 4000)}}).dump();
+                rc.execution.artifacts = bp_res.artifacts;
+                rc.execution.verification = "DimensionImage blueprint completed";
+                run.receipts.push_back(std::move(rc));
+            }
+            finish(run, "completed");
+        } else {
+            finish(run, "failed", bp_res.error.empty() ? "蓝图执行失败" : bp_res.error);
+        }
+        return;
     }
     auto plan = callbacks_.model_routes ? callbacks_.model_routes(execution_context) :
         std::vector<ModelRoute>{{"member", "", callbacks_.configuration ?
@@ -2213,11 +2386,15 @@ void RunService::Impl::execute_phase(Run& run, bool& restart) {
                         std::erase_if(request_messages, [](const ModelMessage& msg) {
                             return msg.role != "user" && (msg.role != "assistant" || !msg.tool_calls.empty());
                         });
-                        request_messages.insert(request_messages.begin(), ModelMessage{"system",
-                            "你是工作助手 " + execution_context.bot_id + "。此轮只对话。闲聊和纯问答直接回答。"
-                            "需求模糊时先问一两个关键问题。用户提出实质任务或修改方案时，请给简洁计划，说明目标、"
-                            "步骤、关键取舍或风险，并以“是否按此计划开始执行？”结束。不要执行、调用工具或提前交付最终结果。",
-                            {}, {}});
+                        std::string disc_sys = callbacks_.discussion_prompt
+                            ? callbacks_.discussion_prompt(execution_context)
+                            : std::string{};
+                        if (disc_sys.empty()) {
+                            disc_sys = "你是工作助手 " + execution_context.bot_id + "。此轮只对话。闲聊和纯问答直接回答。"
+                                "需求模糊时先问一两个关键问题。用户提出实质任务或修改方案时，请给简洁计划，说明目标、"
+                                "步骤、关键取舍或风险，并以“是否按此计划开始执行？”结束。不要执行、调用工具或提前交付最终结果。";
+                        }
+                        request_messages.insert(request_messages.begin(), ModelMessage{"system", std::move(disc_sys), {}, {}});
                     }
                     reply = callbacks_.model(routing.current().config, request_messages, cli_failed ? no_tools : direct_cli ? finish_only : tools,
                         [&](std::string_view kind, std::string_view text) {
@@ -2226,11 +2403,14 @@ void RunService::Impl::execute_phase(Run& run, bool& restart) {
                             buffers[std::string(kind)].append(text);
                             flush(false);
                         }, model_token);
-                    const auto end = reply.text.find_last_not_of(" \r\n\t");
-                    if (discussion && callbacks_.propose_routes && reply.tool_calls.empty() && end != reply.text.npos &&
-                        std::string_view(reply.text).substr(0,end+1).ends_with(confirmation_question)) {
+                    const auto confirm_pos = confirmation_question_offset(reply.text);
+                    if (discussion && callbacks_.propose_routes && reply.tool_calls.empty() && confirm_pos.has_value()) {
                         proposed_routes = callbacks_.propose_routes(execution_context, routing.current(), request_messages, reply.text, model_token);
-                        reply.text.resize(end+1-confirmation_question.size());
+                        reply.text.resize(*confirm_pos);
+                        while (!reply.text.empty() && (reply.text.back() == ' ' || reply.text.back() == '\t' ||
+                                                       reply.text.back() == '\r' || reply.text.back() == '\n')) {
+                            reply.text.pop_back();
+                        }
                         reply.text += "\n\n" + string_field(proposed_routes,"report") + "\n\n" + std::string(confirmation_question);
                     }
                 } catch (...) {
@@ -2375,6 +2555,28 @@ void RunService::Impl::execute_phase(Run& run, bool& restart) {
                 finish(run, "failed", reply.text.empty() ? "CLI 执行失败，请查看执行收据。" : reply.text);
                 return;
             }
+            if (reply.tool_calls.empty() && !discussion && cli_evidence.empty() && !reply.text.empty() &&
+                reply.text.find_first_not_of(" \t\r\n") != std::string::npos) {
+                Json::Array cli_call_ids;
+                bool any_partial = false;
+                for (const auto& r : run.receipts) {
+                    if (r.attempt == run.attempt && r.call.name == "dispatch_native_cli" &&
+                        r.state == "finished" && !r.execution.error && !r.execution.verification.empty()) {
+                        cli_call_ids.emplace_back(r.call.id);
+                        if (string_field(r.execution.metadata, "deliveryState") == "partial") any_partial = true;
+                    }
+                }
+                if (!cli_call_ids.empty()) {
+                    Json::Object finish_args{
+                        {"summary", short_text(reply.text, 6000)},
+                        {"evidenceCallIds", std::move(cli_call_ids)},
+                        {"deliveryMode", any_partial ? "partial" : "complete"}
+                    };
+                    reply.text.clear();
+                    reply.tool_calls = {{"commander-finish-" + std::to_string(revision) + "-" + std::to_string(run.attempt),
+                        "task_finish", Json(std::move(finish_args)).dump()}};
+                }
+            }
             if (reply.tool_calls.empty()) {
                 const bool action_taken = has_action_receipt(run);
                 const bool text_completion_allowed = explicit_text_only_request(run) ||
@@ -2385,9 +2587,7 @@ void RunService::Impl::execute_phase(Run& run, bool& restart) {
                     finish(run, "failed", "unverified_text_completion: this task requires action evidence; text-only and read-only research answers must not fabricate artifacts");
                 } else if (reply.text.empty()) finish(run, "failed", "empty_model_response");
                 else {
-                    const auto end = reply.text.find_last_not_of(" \t\r\n");
-                    if (discussion && end != reply.text.npos &&
-                        std::string_view(reply.text).substr(0, end + 1).ends_with(confirmation_question))
+                    if (discussion && confirmation_question_offset(reply.text).has_value())
                     {
                         run.route_plan = std::move(proposed_routes);
                         run.plan_phase = "ready";
@@ -2761,11 +2961,18 @@ Json RunService::erase(const std::string& id) { return impl_->erase(id); }
 RunSubmission RunService::resume(const std::string& id, const std::string& request, const std::string& text, Json input_context, unsigned plan_attempt, bool user_work) {
     return impl_->resume(id, request, text, input_context, plan_attempt, user_work);
 }
+Json RunService::bind_blueprint(const std::string& id, Json blueprint_meta) {
+    return impl_->bind_blueprint(id, std::move(blueprint_meta));
+}
+RunSubmission RunService::resume_blueprint(const std::string& id, const std::string& request, const std::string& canvas_id, const std::string& text) {
+    return impl_->resume_blueprint(id, request, canvas_id, text);
+}
 bool RunService::wait_until_terminal(const std::string& id, std::chrono::milliseconds timeout, std::stop_token stop) const {
     return impl_->wait_until_terminal(id, timeout, stop);
 }
 std::string RunService::cli_input(const std::string& id, std::size_t count) const { return impl_->cli_input(id, count); }
 std::vector<std::string> RunService::input_texts(const std::string& id) const { return impl_->input_texts(id); }
+Json RunService::verified_outputs(const std::string& id) const { return impl_->verified_outputs(id); }
 Json RunService::brief_json(const std::string& id) const { return impl_->get(id, false); }
 Json RunService::get(const std::string& id) const { return impl_->get(id, true); }
 Json RunService::context_usage(const std::string& id) const { return impl_->context_usage(id); }

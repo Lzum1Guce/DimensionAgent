@@ -49,7 +49,7 @@ export function bindProactiveReminders({ api }) {
       <label>触发方式<select name="kind"><option value="interval">按时间间隔</option><option value="project_watch">检查指定项目目录变化（无变化静默）</option><option value="condition">条件事件出现后</option></select></label>
       <label data-interval>间隔（分钟）<input name="intervalMinutes" type="number" min="1" max="525600" step="1" value="60"></label>
       <label data-trigger-event hidden>触发事件<select name="eventType"><option value="run_completed">任务完成</option><option value="run_partial">部分交付</option><option value="run_failed">执行失败</option></select></label>
-      <label data-project-path class="pr-wide" hidden>监控项目目录绝对路径<input name="projectPath" maxlength="1024" placeholder="例如：C:\\Projects\\MyApp（自动对比文件与 Git HEAD 指纹）"></label>
+      <label data-project-path class="pr-wide" hidden>监控项目目录绝对路径<input name="projectPath" maxlength="1024" placeholder="例如：D:\\SampleProject（自动对比文件与 Git HEAD 指纹）"></label>
       <label>交付档位<select name="delivery"><option value="notification">1. 本地通知（只提醒）</option><option value="draft">2. 仅准备草稿</option><option value="authorized_work">3. 按明确授权排队 Work 任务（最多20次）</option></select></label>
       <label>最大触发预算<input name="budget" type="number" min="1" max="1000" step="1" value="3" required></label>
       <label>负责的伙伴（第3档必选；其余可不限）<select name="botId" data-directory="bots"><option value="">不限伙伴</option></select></label>

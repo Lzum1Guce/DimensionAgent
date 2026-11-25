@@ -100,6 +100,11 @@ struct ModelConfig {
     std::optional<double> temperature{};
     std::string reasoning_effort;
     bool preserve_reasoning_content = false;
+    // Work-only local official CLI reception backend (when protocol == "cli-reception").
+    // Never extracts/forwards credentials and never exposes a proxy endpoint.
+    std::string cli_engine_id;
+    std::string cli_native_provider;
+    std::string cli_native_model;
 };
 
 enum class ModelFailure { Cancelled, Timeout, Transport, Http, OutputLimit, ContextWindowExceeded };

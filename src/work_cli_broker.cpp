@@ -2,18 +2,25 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include "dimension/work_cli_broker.hpp"
+#include "dimension/cli_context_bus.hpp"
+#include "dimension/network_proxy.hpp"
 #include "dimension/atomic_file.hpp"
 #include "dimension/managed_workspaces.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cwctype>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -318,7 +325,8 @@ bool should_skip_walk_dir(std::string_view name) {
     const auto low = ascii_lower(name);
     return low == ".git" || low == "node_modules" || low == "__pycache__" ||
            low == ".venv" || low == "venv" || low == ".hermes" || low == ".kimi" ||
-           low == ".dimension-cli-tmp" || low == "target" || low == ".next" || low == "dist-cache";
+           low == ".dimension" || low == ".dimension-cli-tmp" || low == "target" ||
+           low == ".next" || low == "dist-cache";
 }
 
 bool looks_like_text_file(const fs::path& p, std::uintmax_t sz) {
@@ -357,7 +365,8 @@ std::map<std::string, FileSnap> snapshot_workspace(const fs::path& root) {
         const auto rel_p = it->path().lexically_relative(root);
         std::string rel = path_to_utf8(rel_p);
         std::replace(rel.begin(), rel.end(), '\\', '/');
-        if (rel.empty() || rel.starts_with("..") || rel.starts_with(".dimension-cli-tmp/")) continue;
+        if (rel.empty() || rel.starts_with("..") ||
+            rel.starts_with(".dimension/") || rel.starts_with(".dimension-cli-tmp/")) continue;
         FileSnap snap;
         snap.mtime = it->last_write_time(ec);
         snap.size = it->file_size(ec);
@@ -431,6 +440,13 @@ std::wstring build_environment_block(const std::vector<std::pair<std::string, st
         if ( _wcsicmp(wk.c_str(), L"PATH_PREPEND") == 0 ) {
             const auto existing = env_map.count(L"Path") ? env_map[L"Path"] : env_map[L"PATH"];
             env_map[L"PATH"] = utf8_to_wide(v) + (existing.empty() ? L"" : L";" + existing);
+        } else if (v.empty() &&
+                   (_wcsicmp(wk.c_str(), L"HTTP_PROXY") == 0 ||
+                    _wcsicmp(wk.c_str(), L"HTTPS_PROXY") == 0 ||
+                    _wcsicmp(wk.c_str(), L"ALL_PROXY") == 0 ||
+                    _wcsicmp(wk.c_str(), L"NO_PROXY") == 0)) {
+            // Explicitly strip inherited proxy env vars when user chose "none" or no active proxy.
+            env_map.erase(wk);
         } else {
             env_map[wk] = utf8_to_wide(v);
         }
@@ -474,7 +490,47 @@ Json CliHarnessDescriptor::to_json() const {
         {"nativeConfigured", native_configured},
         {"nativeStatusLabel", native_status_label},
         {"nativeDefaultModel", native_default_model},
-        {"nativeModelGroups", std::move(groups)}
+        {"nativeModelGroups", std::move(groups)},
+        {"sandboxInstalled", sandbox_installed},
+        {"sandboxBinaryPath", sandbox_binary_path},
+        {"sandboxVersion", sandbox_version},
+        {"sandboxNativeConfigured", sandbox_native_configured},
+        {"hostInstalled", host_installed},
+        {"hostBinaryPath", host_binary_path},
+        {"hostVersion", host_version},
+        {"hostNativeConfigured", host_native_configured},
+        {"sandboxInstallable", sandbox_installable},
+        {"sandboxInstallPackage", sandbox_install_package},
+        {"executionMode", execution_mode}
+    };
+}
+
+Json SandboxCliEnvironmentStatus::to_json() const {
+    return O{
+        {"wslAvailable", wsl_available},
+        {"distroReady", distro_ready},
+        {"bwrapReady", bwrap_ready},
+        {"nodeReady", node_ready},
+        {"npmReady", npm_ready},
+        {"pythonReady", python_ready},
+        {"ready", ready},
+        {"nodeVersion", node_version},
+        {"detail", detail}
+    };
+}
+
+Json SandboxCliInstallResult::to_json() const {
+    A arr;
+    for (const auto& l : logs) arr.push_back(l);
+    return O{
+        {"ok", ok},
+        {"cancelled", cancelled},
+        {"exitCode", static_cast<double>(exit_code)},
+        {"engineId", engine_id},
+        {"version", version},
+        {"binaryPath", binary_path},
+        {"error", error},
+        {"logs", std::move(arr)}
     };
 }
 
@@ -1360,14 +1416,1273 @@ void probe_deepseek_harness_native(CliHarnessDescriptor& d, const fs::path& dsh_
         : (d.installed ? "在 DeepSeek Harness 登录账号后可用" : "未安装");
 }
 
+std::vector<std::string> probe_antigravity_cli_models(const std::string& binary_path) {
+    std::vector<std::string> found;
+    if (binary_path.empty()) return found;
+    const std::wstring bin_w = utf8_to_wide(binary_path);
+    const bool is_cmd = ascii_lower(binary_path).ends_with(".cmd") || ascii_lower(binary_path).ends_with(".bat");
+    std::wstring cmd_line = is_cmd
+        ? (L"cmd.exe /d /s /c \"" + quote_win_arg(bin_w) + L" models\"")
+        : (quote_win_arg(bin_w) + L" models");
+
+    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE out_r = nullptr, out_w = nullptr;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0)) return found;
+    HandleGuard out_read(out_r), out_write(out_w);
+    SetHandleInformation(out_read.h, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = out_write.h;
+    si.hStdError = out_write.h;
+
+    std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+    mutable_cmd.push_back(L'\0');
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return found;
+    }
+    HandleGuard proc_h(pi.hProcess), thread_h(pi.hThread);
+    out_write = HandleGuard{};
+
+    std::string raw;
+    std::jthread reader([&]() {
+        char buf[2048];
+        DWORD n = 0;
+        while (ReadFile(out_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            if (raw.size() < 64U * 1024U) raw.append(buf, n);
+        }
+    });
+
+    if (WaitForSingleObject(proc_h.h, 3000) != WAIT_OBJECT_0) {
+        TerminateProcess(proc_h.h, 1);
+        WaitForSingleObject(proc_h.h, 500);
+        if (reader.joinable()) CancelSynchronousIo(static_cast<HANDLE>(reader.native_handle()));
+    }
+    if (reader.joinable()) reader.join();
+
+    DWORD exit_code = 1;
+    GetExitCodeProcess(proc_h.h, &exit_code);
+    if (exit_code != 0 || raw.empty()) return found;
+
+    static const std::regex kSlugRe(R"(\b((?:gemini|claude|gpt|o[134]|grok|deepseek|qwen|kimi)[A-Za-z0-9._-]{2,64})\b)",
+                                    std::regex::icase);
+    std::istringstream iss(ensure_valid_utf8(raw));
+    std::string line;
+    while (std::getline(iss, line)) {
+        std::smatch m;
+        auto it = line.cbegin();
+        while (std::regex_search(it, line.cend(), m, kSlugRe)) {
+            push_unique_str(found, m[1].str());
+            it = m.suffix().first;
+            if (found.size() >= 32) break;
+        }
+        if (found.size() >= 32) break;
+    }
+    return found;
+}
+
+void probe_antigravity_native(CliHarnessDescriptor& d, const fs::path& agy_cfg_dir, const fs::path& agy_app_dir) {
+    std::error_code ec;
+    const fs::path settings_p = agy_cfg_dir / L"settings.json";
+    const bool has_settings = fs::is_regular_file(settings_p, ec);
+    const bool has_app_dir = fs::is_directory(agy_app_dir, ec);
+    d.native_configured = d.installed && (has_settings || has_app_dir);
+
+    std::vector<std::string> models;
+    if (has_settings) {
+        try {
+            const auto doc = Json::parse(read_small_file(settings_p));
+            if (doc.is_object()) {
+                const auto dm = trim_copy(jstr(doc, "model"));
+                if (!dm.empty()) {
+                    d.native_default_model = dm;
+                    push_unique_str(models, dm);
+                }
+                if (const auto* cm = doc.find("customModelsConfig"); cm && cm->is_object()) {
+                    if (const auto* arr = cm->find("models"); arr && arr->is_array()) {
+                        for (const auto& item : arr->as_array()) {
+                            if (item.is_string()) push_unique_str(models, item.as_string());
+                            else if (item.is_object()) {
+                                const auto mid = jstr(item, "id", jstr(item, "model", jstr(item, "name")));
+                                if (!mid.empty()) push_unique_str(models, mid);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+
+    if (d.installed) {
+        const auto discovered = probe_antigravity_cli_models(d.binary_path);
+        if (!discovered.empty())
+            d.native_model_groups.push_back({"Antigravity CLI 返回的模型", "", discovered});
+        for (const auto& model : discovered)
+            std::erase(models, model);
+        if (!models.empty())
+            d.native_model_groups.push_back({"本地配置的模型（可用性待验证）", "", std::move(models)});
+        d.native_status_label = d.native_configured
+            ? "已发现本地配置 · 登录状态待验证"
+            : "已安装 · 登录状态待验证";
+    } else {
+        d.native_status_label = "未安装（PowerShell: irm https://antigravity.google/cli/install.ps1 | iex）";
+    }
+}
+
+struct SandboxCliSpec {
+    const char* engine_id;
+    const char* bin_name;
+    const char* install_kind;       // "npm" | "hermes_script"
+    const char* package_or_url;     // Official npm package or official Linux install URL
+    const char* login_shell_cmd;    // Official interactive login command inside sandbox
+    const char* cred_rel_paths[4];  // Relative paths inside /var/lib/dimension-cli-homes/<id>/
+};
+
+const SandboxCliSpec* find_sandbox_cli_spec(std::string_view engine_id) {
+    static const SandboxCliSpec kSpecs[] = {
+        {
+            "claude-code", "claude", "npm", "@anthropic-ai/claude-code",
+            "claude",
+            {".claude.json", ".claude/settings.json", ".claude/.credentials.json", nullptr}
+        },
+        {
+            "codex", "codex", "npm", "@openai/codex",
+            "codex login",
+            {".codex/auth.json", ".codex/config.toml", nullptr, nullptr}
+        },
+        {
+            "gemini-cli", "gemini", "npm", "@google/gemini-cli",
+            "gemini",
+            {".gemini/oauth_creds.json", ".gemini/settings.json", ".gemini/google_accounts.json", nullptr}
+        },
+        {
+            "qwen-code", "qwen", "npm", "@qwen-code/qwen-code",
+            "qwen",
+            {".qwen/oauth_creds.json", ".qwen/settings.json", nullptr, nullptr}
+        },
+        {
+            "opencode", "opencode", "npm", "opencode-ai",
+            "opencode auth login",
+            {".local/share/opencode/auth.json", ".config/opencode/opencode.json", nullptr, nullptr}
+        },
+        {
+            "kimi-code", "kimi", "npm", "@moonshot-ai/kimi-code",
+            "kimi login",
+            {".kimi-code/credentials.json", ".kimi-code/config.toml", nullptr, nullptr}
+        },
+        {
+            "deepseek-harness", "dsh", "npm", "@deepseek-ai/dsh",
+            "dsh login",
+            {".dsh/.credentials.yaml", ".dsh/config.yaml", nullptr, nullptr}
+        },
+        {
+            "hermes", "hermes", "hermes_script", "https://hermes-agent.nousresearch.com/install.sh",
+            "hermes setup",
+            {".hermes/auth.json", ".hermes/config.yaml", ".hermes/.env", nullptr}
+        },
+        {
+            "antigravity", "agy", "antigravity_script", "https://antigravity.google/cli/install.sh",
+            "agy",
+            {".gemini/antigravity-cli/settings.json", ".gemini/antigravity", ".gemini/oauth_creds.json", ".config/antigravity"}
+        },
+    };
+    for (const auto& s : kSpecs) {
+        if (engine_id == s.engine_id) return &s;
+    }
+    return nullptr;
+}
+
+std::string strip_wsl_utf16_noise(std::string_view raw) {
+    // wsl.exe emits UTF-16LE diagnostics (e.g. localhost proxy warning) onto stderr.
+    // Convert UTF-16LE cleanly to UTF-8 first so no invalid UTF-8 bytes ever leak into JSON logs!
+    std::string text;
+    if (raw.find('\0') != std::string_view::npos && raw.size() >= 2) {
+        const std::size_t wcount = raw.size() / 2;
+        std::wstring wbuf(wcount, L'\0');
+        std::memcpy(wbuf.data(), raw.data(), wcount * 2);
+        const int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
+                                              nullptr, 0, nullptr, nullptr);
+        if (u8len > 0) {
+            text.resize(static_cast<std::size_t>(u8len));
+            WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
+                                text.data(), u8len, nullptr, nullptr);
+        }
+    } else {
+        text = ensure_valid_utf8(raw);
+    }
+    text = trim_copy(text);
+    if (text.empty()) return {};
+    if (text.find("wsl:") != std::string::npos && text.find("localhost") != std::string::npos) {
+        return {};
+    }
+    return ensure_valid_utf8(text);
+}
+
+fs::path resolve_wsl_exe_path(const fs::path& provided) {
+    std::error_code ec;
+    if (!provided.empty() && fs::is_regular_file(provided, ec)) return provided;
+    const fs::path sys32 = L"C:\\Windows\\System32\\wsl.exe";
+    if (fs::is_regular_file(sys32, ec)) return sys32;
+    return {};
+}
+
+struct WslExecResult {
+    bool launched = false;
+    bool cancelled = false;
+    int exit_code = -1;
+    std::string stdout_text;
+    std::string stderr_text;
+};
+
+WslExecResult run_wsl_streaming_command(const fs::path& wsl_exe,
+                                        const std::vector<std::wstring>& args,
+                                        const std::string& stdin_payload,
+                                        int timeout_seconds,
+                                        const std::function<void(std::string_view)>& on_line = {},
+                                        std::stop_token stop = {}) {
+    WslExecResult res;
+    std::error_code ec;
+    if (wsl_exe.empty() || !fs::is_regular_file(wsl_exe, ec)) return res;
+
+    std::wstring cmd_line = quote_win_arg(wsl_exe.wstring());
+    for (const auto& a : args) {
+        cmd_line.push_back(L' ');
+        cmd_line += quote_win_arg(a);
+    }
+
+    HandleGuard out_read, err_read, in_write, proc_h, thread_h, job;
+    {
+        // Serialize pipe creation + CreateProcessW(bInheritHandles=TRUE) + child-end close
+        // so concurrent WSL calls can NEVER accidentally inherit each other's pipe write handles.
+        static std::mutex g_wsl_spawn_mutex;
+        std::lock_guard spawn_lk(g_wsl_spawn_mutex);
+
+        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE out_r = nullptr, out_w = nullptr, err_r = nullptr, err_w = nullptr, in_r = nullptr, in_w = nullptr;
+        if (!CreatePipe(&out_r, &out_w, &sa, 0)) return res;
+        out_read = HandleGuard(out_r);
+        HandleGuard out_write(out_w);
+        SetHandleInformation(out_read.h, HANDLE_FLAG_INHERIT, 0);
+
+        if (!CreatePipe(&err_r, &err_w, &sa, 0)) return res;
+        err_read = HandleGuard(err_r);
+        HandleGuard err_write(err_w);
+        SetHandleInformation(err_read.h, HANDLE_FLAG_INHERIT, 0);
+
+        if (!CreatePipe(&in_r, &in_w, &sa, 0)) return res;
+        HandleGuard in_read(in_r);
+        in_write = HandleGuard(in_w);
+        SetHandleInformation(in_write.h, HANDLE_FLAG_INHERIT, 0);
+        if (stdin_payload.empty()) in_write = HandleGuard{};
+
+        job = HandleGuard(CreateJobObjectW(nullptr, nullptr));
+        if (job.h) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            SetInformationJobObject(job.h, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdInput = in_read.h;
+        si.hStdOutput = out_write.h;
+        si.hStdError = err_write.h;
+
+        std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+        mutable_cmd.push_back(L'\0');
+
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+                            nullptr, nullptr, &si, &pi)) {
+            return res;
+        }
+        res.launched = true;
+        proc_h = HandleGuard(pi.hProcess);
+        thread_h = HandleGuard(pi.hThread);
+        // out_write, err_write, in_read close right here before releasing g_wsl_spawn_mutex.
+    }
+
+    if (job.h) AssignProcessToJobObject(job.h, proc_h.h);
+    ResumeThread(thread_h.h);
+
+    std::jthread stdin_writer;
+    if (in_write.h && !stdin_payload.empty()) {
+        stdin_writer = std::jthread([h_in = std::move(in_write), payload = stdin_payload]() mutable {
+            const char* p = payload.data();
+            std::size_t rem = payload.size();
+            while (rem > 0) {
+                DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(rem, 32768U));
+                DWORD written = 0;
+                if (!WriteFile(h_in.h, p, chunk, &written, nullptr) || written == 0) break;
+                p += written;
+                rem -= written;
+            }
+            h_in = HandleGuard{};
+        });
+    }
+
+    std::mutex cb_mu;
+    auto emit_chunk = [&](std::string& line_buf, const char* data, DWORD n, bool is_err) {
+        // When stderr contains UTF-16LE lines (e.g. wsl.exe warnings), split on '\n' carefully:
+        // a UTF-16LE '\n' is {0x0A, 0x00}; wait until the trailing 0x00 is consumed so line lengths stay even.
+        for (DWORD i = 0; i < n; ++i) {
+            const char ch = data[i];
+            if (ch == '\n') {
+                if (is_err && (line_buf.size() % 2 == 1) && i + 1 < n && data[i + 1] == '\0') {
+                    ++i;
+                }
+                if (!line_buf.empty()) {
+                    const std::string clean = is_err ? strip_wsl_utf16_noise(line_buf) : trim_copy(ensure_valid_utf8(line_buf));
+                    if (!clean.empty() && on_line) {
+                        std::lock_guard lk(cb_mu);
+                        on_line(clean);
+                    }
+                    line_buf.clear();
+                }
+            } else if (ch == '\r') {
+                if (is_err && (line_buf.size() % 2 == 1) && i + 1 < n && data[i + 1] == '\0') {
+                    ++i;
+                }
+                if (!is_err && !line_buf.empty()) {
+                    const std::string clean = trim_copy(ensure_valid_utf8(line_buf));
+                    if (!clean.empty() && on_line) {
+                        std::lock_guard lk(cb_mu);
+                        on_line(clean);
+                    }
+                    line_buf.clear();
+                }
+            } else {
+                line_buf.push_back(ch);
+            }
+        }
+    };
+
+    std::jthread out_reader([h = out_read.h, &res, &emit_chunk]() {
+        char buf[4096];
+        std::string lbuf;
+        DWORD n = 0;
+        while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            res.stdout_text.append(buf, n);
+            emit_chunk(lbuf, buf, n, false);
+        }
+        if (!lbuf.empty()) emit_chunk(lbuf, "\n", 1, false);
+    });
+
+    std::jthread err_reader([h = err_read.h, &res, &emit_chunk]() {
+        char buf[4096];
+        std::string lbuf;
+        DWORD n = 0;
+        while (ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            res.stderr_text.append(buf, n);
+            emit_chunk(lbuf, buf, n, true);
+        }
+        if (!lbuf.empty()) emit_chunk(lbuf, "\n", 1, true);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::clamp(timeout_seconds, 3, 1800));
+    while (true) {
+        const DWORD wait_rc = WaitForSingleObject(proc_h.h, 120);
+        if (wait_rc == WAIT_OBJECT_0) break;
+        if (stop.stop_requested()) {
+            res.cancelled = true;
+            if (job.h) TerminateJobObject(job.h, 130);
+            else TerminateProcess(proc_h.h, 130);
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            if (job.h) TerminateJobObject(job.h, 124);
+            else TerminateProcess(proc_h.h, 124);
+            res.stderr_text += "\n操作超时（超过 " + std::to_string(timeout_seconds) + " 秒）";
+            break;
+        }
+    }
+
+    DWORD code = 1;
+    if (GetExitCodeProcess(proc_h.h, &code)) res.exit_code = static_cast<int>(code);
+    // Close JobObject after root process exits so no stray grandchild keeps stdout/stderr pipes open.
+    job = HandleGuard{};
+
+    if (stdin_writer.joinable()) stdin_writer.join();
+    if (out_reader.joinable()) out_reader.join();
+    if (err_reader.joinable()) err_reader.join();
+
+    return res;
+}
+
+struct SandboxCliProbeItem {
+    bool installed = false;
+    std::string binary_path;
+    std::string version;
+    bool native_configured = false;
+};
+
+struct SandboxCliSnapshot {
+    SandboxCliEnvironmentStatus env;
+    std::map<std::string, SandboxCliProbeItem> items;
+};
+
+SandboxCliSnapshot probe_sandbox_cli_snapshot(const fs::path& wsl_executable,
+                                              const std::string& sandbox_distribution) {
+    SandboxCliSnapshot snap;
+    const fs::path wsl = resolve_wsl_exe_path(wsl_executable);
+    snap.env.wsl_available = !wsl.empty();
+    if (!snap.env.wsl_available) {
+        snap.env.detail = "未检测到 WSL 运行时（C:\\Windows\\System32\\wsl.exe）";
+        return snap;
+    }
+    if (sandbox_distribution.empty()) {
+        snap.env.detail = "未配置隔离 Linux 沙盒发行版名称";
+        return snap;
+    }
+
+    static const char* kProbeNodeScript = R"NODE(
+const fs = require('fs');
+const cp = require('child_process');
+const existsExec = p => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } };
+const existsAny = p => { try { fs.accessSync(p, fs.constants.F_OK); return true; } catch { return false; } };
+const which = name => {
+  for (const dir of ['/opt/dimension-tools/bin', '/usr/local/bin', '/usr/bin', '/bin']) {
+    const p = dir + '/' + name;
+    if (existsExec(p)) return p;
+  }
+  return '';
+};
+const readPkgVer = pkg => {
+  try {
+    const j = JSON.parse(fs.readFileSync('/opt/dimension-tools/npm/node_modules/' + pkg + '/package.json', 'utf8'));
+    return String(j.version || '');
+  } catch { return ''; }
+};
+const readHermesVer = () => {
+  for (const f of ['/opt/dimension-tools/hermes/repo/pyproject.toml', '/opt/dimension-tools/hermes/repo/package.json']) {
+    try {
+      const txt = fs.readFileSync(f, 'utf8');
+      const m = txt.match(/version["']?\s*[:=]\s*["']([^"']+)["']/i);
+      if (m) return m[1];
+    } catch {}
+  }
+  return '';
+};
+const readAgyVer = () => {
+  try {
+    const out = cp.execFileSync('/opt/dimension-tools/bin/agy', ['--version'], { encoding: 'utf8', timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] });
+    const m = String(out || '').match(/(\d+\.\d+\.\d+[A-Za-z0-9._-]*)/);
+    return m ? m[1] : '';
+  } catch { return ''; }
+};
+const specs = [
+  { id: 'antigravity', bin: 'agy', pkg: '', creds: ['.gemini/antigravity-cli/settings.json', '.gemini/antigravity', '.gemini/oauth_creds.json', '.config/antigravity'] },
+  { id: 'claude-code', bin: 'claude', pkg: '@anthropic-ai/claude-code', creds: ['.claude.json', '.claude/settings.json', '.claude/.credentials.json'] },
+  { id: 'codex', bin: 'codex', pkg: '@openai/codex', creds: ['.codex/auth.json', '.codex/config.toml'] },
+  { id: 'gemini-cli', bin: 'gemini', pkg: '@google/gemini-cli', creds: ['.gemini/oauth_creds.json', '.gemini/settings.json', '.gemini/google_accounts.json'] },
+  { id: 'qwen-code', bin: 'qwen', pkg: '@qwen-code/qwen-code', creds: ['.qwen/oauth_creds.json', '.qwen/settings.json'] },
+  { id: 'opencode', bin: 'opencode', pkg: 'opencode-ai', creds: ['.local/share/opencode/auth.json', '.config/opencode/opencode.json'] },
+  { id: 'kimi-code', bin: 'kimi', pkg: '@moonshot-ai/kimi-code', creds: ['.kimi-code/credentials.json', '.kimi-code/config.toml'] },
+  { id: 'deepseek-harness', bin: 'dsh', pkg: '@deepseek-ai/dsh', creds: ['.dsh/.credentials.yaml', '.dsh/config.yaml'] },
+  { id: 'hermes', bin: 'hermes', pkg: '', creds: ['.hermes/auth.json', '.hermes/config.yaml', '.hermes/.env'] }
+];
+const items = {};
+for (const s of specs) {
+  const binPath = '/opt/dimension-tools/bin/' + s.bin;
+  const installed = existsExec(binPath);
+  const ver = installed ? (s.id === 'hermes' ? readHermesVer() : (s.id === 'antigravity' ? readAgyVer() : readPkgVer(s.pkg))) : '';
+  const home = '/var/lib/dimension-cli-homes/' + s.id;
+  const nativeConfigured = installed && s.creds.some(rel => existsAny(home + '/' + rel));
+  items[s.id] = { installed, binaryPath: installed ? binPath : '', version: ver, nativeConfigured };
+}
+const env = {
+  bwrapReady: Boolean(which('bwrap')),
+  nodeReady: Boolean(which('node')),
+  npmReady: Boolean(which('npm')),
+  pythonReady: Boolean(which('python3')),
+  nodeVersion: process.version || ''
+};
+process.stdout.write(JSON.stringify({ env, items }));
+)NODE";
+
+    const auto r = run_wsl_streaming_command(
+        wsl,
+        {L"-d", utf8_to_wide(sandbox_distribution), L"-u", L"root", L"--exec", L"/usr/bin/node", L"-"},
+        kProbeNodeScript,
+        12);
+    if (!r.launched || r.exit_code != 0) {
+        const std::string err_clean = strip_wsl_utf16_noise(r.stderr_text);
+        snap.env.detail = err_clean.empty()
+            ? ("无法连接隔离沙盒 " + sandbox_distribution + "（请先在扩展中枢完成沙盒初始化）")
+            : ("沙盒探测失败：" + err_clean);
+        return snap;
+    }
+
+    try {
+        const auto brace = r.stdout_text.find('{');
+        if (brace == std::string::npos) {
+            snap.env.detail = "沙盒探针未返回有效 JSON";
+            return snap;
+        }
+        const Json doc = Json::parse(r.stdout_text.substr(brace));
+        snap.env.distro_ready = true;
+        if (const auto* ev = doc.find("env"); ev && ev->is_object()) {
+            snap.env.bwrap_ready = ev->find("bwrapReady") && ev->at("bwrapReady").is_bool() && ev->at("bwrapReady").as_bool();
+            snap.env.node_ready = ev->find("nodeReady") && ev->at("nodeReady").is_bool() && ev->at("nodeReady").as_bool();
+            snap.env.npm_ready = ev->find("npmReady") && ev->at("npmReady").is_bool() && ev->at("npmReady").as_bool();
+            snap.env.python_ready = ev->find("pythonReady") && ev->at("pythonReady").is_bool() && ev->at("pythonReady").as_bool();
+            snap.env.node_version = jstr(*ev, "nodeVersion");
+        }
+        snap.env.ready = snap.env.distro_ready && snap.env.bwrap_ready && snap.env.node_ready && snap.env.npm_ready;
+        snap.env.detail = snap.env.ready
+            ? ("Bubblewrap 内核沙盒已就绪 · Node " + snap.env.node_version)
+            : "沙盒缺少 bwrap 或 Node/npm 运行时";
+        if (const auto* itm = doc.find("items"); itm && itm->is_object()) {
+            for (const auto& [k, v] : itm->as_object()) {
+                if (!v.is_object()) continue;
+                SandboxCliProbeItem pi;
+                pi.installed = v.find("installed") && v.at("installed").is_bool() && v.at("installed").as_bool();
+                pi.binary_path = jstr(v, "binaryPath");
+                pi.version = jstr(v, "version");
+                pi.native_configured = v.find("nativeConfigured") && v.at("nativeConfigured").is_bool() && v.at("nativeConfigured").as_bool();
+                snap.items[k] = std::move(pi);
+            }
+        }
+    } catch (const std::exception& ex) {
+        snap.env.detail = std::string("解析沙盒状态失败：") + ex.what();
+    }
+    return snap;
+}
+
 } // namespace
+
+std::string windows_path_to_wsl_path(const std::filesystem::path& win_path,
+                                     const std::string& sandbox_distribution) {
+    std::string raw = path_to_utf8(win_path);
+    if (raw.empty()) return {};
+    if (raw.front() == '/') return raw;
+
+    std::string norm = raw;
+    std::replace(norm.begin(), norm.end(), '\\', '/');
+    // Handle \\wsl.localhost\<distro>\... or \\wsl$\<distro>\...
+    if (norm.starts_with("//wsl.localhost/") || norm.starts_with("//wsl$/")) {
+        const std::size_t prefix_len = norm.starts_with("//wsl.localhost/") ? 16U : 7U;
+        const std::size_t slash = norm.find('/', prefix_len);
+        if (slash == std::string::npos) return "/";
+        const std::string dist = norm.substr(prefix_len, slash - prefix_len);
+        if (!sandbox_distribution.empty() && ascii_lower(dist) != ascii_lower(sandbox_distribution)) {
+            return norm.substr(slash);
+        }
+        return norm.substr(slash);
+    }
+    // Handle Windows drive letter e.g. D:/SampleProject -> /mnt/d/SampleProject
+    if (norm.size() >= 2 && std::isalpha(static_cast<unsigned char>(norm[0])) && norm[1] == ':') {
+        const char drive = static_cast<char>(std::tolower(static_cast<unsigned char>(norm[0])));
+        std::string rest = (norm.size() > 2) ? norm.substr(2) : std::string{};
+        if (!rest.empty() && rest.front() != '/') rest.insert(rest.begin(), '/');
+        return std::string("/mnt/") + drive + rest;
+    }
+    return norm;
+}
+
+SandboxCliEnvironmentStatus probe_sandbox_cli_environment(const std::filesystem::path& wsl_executable,
+                                                          const std::string& sandbox_distribution) {
+    return probe_sandbox_cli_snapshot(wsl_executable, sandbox_distribution).env;
+}
+
+SandboxCliInstallResult manage_sandbox_cli(const SandboxCliInstallRequest& req,
+                                           const std::function<void(std::string_view)>& on_log,
+                                           std::stop_token stop) {
+    SandboxCliInstallResult out;
+    out.engine_id = req.engine_id;
+    auto push_log = [&](std::string_view line) {
+        if (line.empty()) return;
+        if (out.logs.size() < 400) out.logs.emplace_back(line);
+        if (on_log) on_log(line);
+    };
+
+    const SandboxCliSpec* spec = find_sandbox_cli_spec(req.engine_id);
+    if (!spec) {
+        out.error = "不支持的沙盒 CLI 引擎：" + req.engine_id;
+        return out;
+    }
+    const fs::path wsl = resolve_wsl_exe_path(req.wsl_executable);
+    if (wsl.empty() || req.sandbox_distribution.empty()) {
+        out.error = "隔离沙盒（WSL dimension-sandbox）未就绪，无法管理沙盒 CLI";
+        return out;
+    }
+
+    const std::string action = (req.action == "uninstall" || req.action == "update") ? req.action : "install";
+    const std::string registry_url = (req.registry == "official")
+        ? "https://registry.npmjs.org"
+        : "https://registry.npmmirror.com";
+
+    std::ostringstream script;
+    script << "set -eu\n"
+           << "export DEBIAN_FRONTEND=noninteractive\n"
+           << "export NO_COLOR=1\n"
+           << "mkdir -p /opt/dimension-tools/bin /opt/dimension-tools/npm /var/lib/dimension-cli-homes\n"
+           << "mkdir -p -m 700 /var/lib/dimension-cli-homes/" << spec->engine_id << "\n"
+           << "chown -R 1001:1002 /var/lib/dimension-cli-homes/" << spec->engine_id << "\n";
+
+    // Respect DimensionAgent's global network proxy policy ("auto" | "global" | "none")
+    // so large official Linux archives (e.g. 98MB Antigravity CLI) honor the user's proxy mode.
+    auto resolve_host_download_proxy = []() -> std::string {
+        const auto resolved = resolve_active_network_proxy();
+        return (resolved.use_proxy && !resolved.active_proxy_url.empty())
+            ? resolved.active_proxy_url : std::string{};
+    };
+
+    auto run_host_curl = [&](const std::vector<std::wstring>& extra_args,
+                             const fs::path& progress_file,
+                             std::uint64_t expected_total_bytes,
+                             const std::string& progress_label,
+                             int max_seconds,
+                             std::string& out_stdout,
+                             bool& out_cancelled) -> int {
+        out_stdout.clear();
+        out_cancelled = false;
+        const std::string curl_u8 = find_in_windows_path({L"curl.exe"});
+        if (curl_u8.empty()) return -1;
+
+        std::wstring cmd = quote_win_arg(utf8_to_wide(curl_u8));
+        for (const auto& a : extra_args) {
+            cmd.push_back(L' ');
+            cmd += quote_win_arg(a);
+        }
+
+        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE out_r = nullptr, out_w = nullptr;
+        if (!CreatePipe(&out_r, &out_w, &sa, 0)) return -1;
+        HandleGuard out_read(out_r), out_write(out_w);
+        SetHandleInformation(out_read.h, HANDLE_FLAG_INHERIT, 0);
+
+        HandleGuard job(CreateJobObjectW(nullptr, nullptr));
+        if (job.h) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            SetInformationJobObject(job.h, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdOutput = out_write.h;
+        si.hStdError = out_write.h;
+
+        std::vector<wchar_t> mutable_cmd(cmd.begin(), cmd.end());
+        mutable_cmd.push_back(L'\0');
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+                            nullptr, nullptr, &si, &pi)) {
+            return -1;
+        }
+        HandleGuard proc_h(pi.hProcess), thread_h(pi.hThread);
+        out_write = HandleGuard{};
+        if (job.h) AssignProcessToJobObject(job.h, proc_h.h);
+        ResumeThread(thread_h.h);
+
+        std::jthread reader([&]() {
+            char buf[2048];
+            DWORD n = 0;
+            while (ReadFile(out_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+                if (out_stdout.size() < 64U * 1024U) {
+                    out_stdout.append(buf, n);
+                }
+            }
+        });
+
+        const auto started = std::chrono::steady_clock::now();
+        const auto deadline = started + std::chrono::seconds(max_seconds);
+        auto last_prog_log = started;
+        std::uint64_t last_reported_mb = 0;
+        while (true) {
+            if (WaitForSingleObject(proc_h.h, 120) == WAIT_OBJECT_0) break;
+            if (stop.stop_requested()) {
+                out_cancelled = true;
+                if (job.h) TerminateJobObject(job.h, 130);
+                else TerminateProcess(proc_h.h, 130);
+                break;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                if (job.h) TerminateJobObject(job.h, 124);
+                else TerminateProcess(proc_h.h, 124);
+                break;
+            }
+            if (!progress_file.empty() && (now - last_prog_log) >= std::chrono::milliseconds(1500)) {
+                last_prog_log = now;
+                std::error_code sz_ec;
+                const auto cur_bytes = fs::is_regular_file(progress_file, sz_ec) ? fs::file_size(progress_file, sz_ec) : 0ULL;
+                const auto cur_mb = cur_bytes / (1024ULL * 1024ULL);
+                if (cur_bytes > 0 && cur_mb != last_reported_mb) {
+                    last_reported_mb = cur_mb;
+                    const double elapsed_s = std::max(0.5, std::chrono::duration<double>(now - started).count());
+                    const double speed_mb_s = (static_cast<double>(cur_bytes) / (1024.0 * 1024.0)) / elapsed_s;
+                    char line_buf[192]{};
+                    if (expected_total_bytes > 0) {
+                        const int pct = std::clamp(static_cast<int>((cur_bytes * 100ULL) / expected_total_bytes), 0, 99);
+                        std::snprintf(line_buf, sizeof(line_buf), "%s：%.1f / %.1f MB (%d%%, %.1f MB/s)…",
+                                      progress_label.c_str(),
+                                      static_cast<double>(cur_bytes) / (1024.0 * 1024.0),
+                                      static_cast<double>(expected_total_bytes) / (1024.0 * 1024.0),
+                                      pct, speed_mb_s);
+                    } else {
+                        std::snprintf(line_buf, sizeof(line_buf), "%s：已下载 %.1f MB (%.1f MB/s)…",
+                                      progress_label.c_str(),
+                                      static_cast<double>(cur_bytes) / (1024.0 * 1024.0),
+                                      speed_mb_s);
+                    }
+                    push_log(line_buf);
+                }
+            }
+        }
+        WaitForSingleObject(proc_h.h, 2000);
+        DWORD rc = 1;
+        GetExitCodeProcess(proc_h.h, &rc);
+        if (reader.joinable()) {
+            CancelSynchronousIo(static_cast<HANDLE>(reader.native_handle()));
+            reader.join();
+        }
+        return static_cast<int>(rc);
+    };
+
+    struct HostStageCleanup {
+        fs::path dir;
+        ~HostStageCleanup() {
+            if (!dir.empty()) {
+                std::error_code rm_ec;
+                fs::remove_all(dir, rm_ec);
+            }
+        }
+    } host_stage_cleanup;
+
+    if (action == "uninstall") {
+        push_log(std::string("正在从沙盒卸载 ") + spec->engine_id + "…");
+        if (std::string_view(spec->install_kind) == "npm") {
+            script << "npm uninstall --prefix /opt/dimension-tools/npm " << spec->package_or_url << " || true\n"
+                   << "rm -f /opt/dimension-tools/bin/" << spec->bin_name << "\n";
+        } else if (std::string_view(spec->install_kind) == "antigravity_script") {
+            script << "rm -rf /opt/dimension-tools/antigravity /opt/dimension-tools/bin/agy\n";
+        } else {
+            script << "rm -rf /opt/dimension-tools/hermes /opt/dimension-tools/bin/hermes\n";
+        }
+        if (req.clear_credentials) {
+            script << "rm -rf /var/lib/dimension-cli-homes/" << spec->engine_id << "\n";
+        }
+        script << "echo 'DIMENSION_SANDBOX_CLI_DONE'\n";
+    } else if (std::string_view(spec->install_kind) == "antigravity_script") {
+        // Fast-path: download official Antigravity Linux archive on Windows host (automatically inheriting
+        // host system proxy even when WSL2 NAT cannot mirror localhost proxies), verify SHA-512 inside WSL,
+        // and atomically install into /opt/dimension-tools/antigravity/agy.
+        bool host_staged_ok = false;
+        std::string host_staged_tar_wsl;
+        std::string host_staged_sha512;
+        std::string host_staged_ver;
+        {
+            const std::string proxy = resolve_host_download_proxy();
+            const bool no_proxy_mode = (resolve_active_network_proxy().mode == "none");
+            const std::string manifest_url =
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json";
+            push_log(proxy.empty()
+                ? (no_proxy_mode
+                    ? "当前为无代理直连模式，正在查询 Google Antigravity 官方 Linux 发行清单…"
+                    : "正在查询 Google Antigravity 官方 Linux 发行清单…")
+                : ("正在经由代理 (" + proxy + ") 查询 Google Antigravity 官方 Linux 发行清单…"));
+
+            std::vector<std::wstring> m_args{L"-fsSL", L"--max-time", L"25"};
+            if (!proxy.empty()) {
+                m_args.push_back(L"-x");
+                m_args.push_back(utf8_to_wide(proxy));
+            } else if (no_proxy_mode) {
+                m_args.push_back(L"--noproxy");
+                m_args.push_back(L"*");
+            }
+            m_args.push_back(utf8_to_wide(manifest_url));
+
+            std::string manifest_body;
+            bool m_cancelled = false;
+            const int m_rc = run_host_curl(m_args, {}, 0, {}, 30, manifest_body, m_cancelled);
+            if (m_cancelled || stop.stop_requested()) {
+                out.cancelled = true;
+                out.error = "已取消沙盒 CLI 操作";
+                return out;
+            }
+            if (m_rc == 0 && !manifest_body.empty()) {
+                try {
+                    const Json mdoc = Json::parse(trim_copy(manifest_body));
+                    const std::string ver = jstr(mdoc, "version");
+                    const std::string dl_url = jstr(mdoc, "url");
+                    const std::string sha512 = ascii_lower(jstr(mdoc, "sha512"));
+                    const bool valid_sha = (sha512.size() == 128U) &&
+                        std::all_of(sha512.begin(), sha512.end(), [](unsigned char ch) {
+                            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                        });
+                    if (dl_url.starts_with("https://") && valid_sha) {
+                        std::error_code tmp_ec;
+                        const fs::path tmp_root = fs::temp_directory_path(tmp_ec) /
+                            utf8_to_path("dimension-agy-stage-" + std::to_string(GetCurrentProcessId()) + "-" +
+                                         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                        fs::create_directories(tmp_root, tmp_ec);
+                        host_stage_cleanup.dir = tmp_root;
+                        const bool is_tgz = dl_url.find(".tar.gz") != std::string::npos;
+                        const fs::path payload_path = tmp_root / (is_tgz ? L"cli_linux_x64.tar.gz" : L"agy");
+
+                        push_log("发现最新官方版本 v" + ver + "，正在经由宿主机高速下载安装包…");
+                        std::vector<std::wstring> d_args{L"-fsSL", L"--max-time", L"540"};
+                        if (!proxy.empty()) {
+                            d_args.push_back(L"-x");
+                            d_args.push_back(utf8_to_wide(proxy));
+                        } else if (no_proxy_mode) {
+                            d_args.push_back(L"--noproxy");
+                            d_args.push_back(L"*");
+                        }
+                        d_args.push_back(L"-o");
+                        d_args.push_back(payload_path.wstring());
+                        d_args.push_back(utf8_to_wide(dl_url));
+
+                        std::string dl_out;
+                        bool dl_cancelled = false;
+                        const int dl_rc = run_host_curl(
+                            d_args, payload_path, 0,
+                            "正在下载 Antigravity CLI v" + ver, 550, dl_out, dl_cancelled);
+                        if (dl_cancelled || stop.stop_requested()) {
+                            out.cancelled = true;
+                            out.error = "已取消沙盒 CLI 操作";
+                            return out;
+                        }
+                        if (dl_rc == 0 && fs::is_regular_file(payload_path, tmp_ec) && fs::file_size(payload_path, tmp_ec) > 1024U) {
+                            host_staged_tar_wsl = windows_path_to_wsl_path(payload_path, req.sandbox_distribution);
+                            host_staged_sha512 = sha512;
+                            host_staged_ver = ver;
+                            host_staged_ok = !host_staged_tar_wsl.empty();
+                            if (host_staged_ok) {
+                                push_log("安装包下载完成，正在沙盒内执行 SHA-512 校验与原子安装…");
+                            }
+                        }
+                    }
+                } catch (...) {}
+            }
+        }
+
+        if (host_staged_ok) {
+            const bool is_tgz = host_staged_tar_wsl.ends_with(".tar.gz");
+            script << "mkdir -p /opt/dimension-tools/antigravity\n"
+                   << "rm -rf /opt/dimension-tools/antigravity/.update.* /opt/dimension-tools/antigravity/.stage.*\n"
+                   << "stage=$(mktemp -d /opt/dimension-tools/antigravity/.stage.XXXXXX)\n"
+                   << "trap 'rm -rf -- \"$stage\"' EXIT\n"
+                   << "echo '" << host_staged_sha512 << "  " << host_staged_tar_wsl << "' | sha512sum -c -\n";
+            if (is_tgz) {
+                script << "tar -xzf '" << host_staged_tar_wsl << "' -C \"$stage\" antigravity\n"
+                       << "cp \"$stage/antigravity\" \"$stage/agy\"\n";
+            } else {
+                script << "cp '" << host_staged_tar_wsl << "' \"$stage/agy\"\n";
+            }
+            script << "chmod a+rx \"$stage/agy\"\n"
+                   << "\"$stage/agy\" --version\n"
+                   << "ln -s /opt/dimension-tools/antigravity/agy \"$stage/entry\"\n"
+                   << "mv -fT \"$stage/agy\" /opt/dimension-tools/antigravity/agy\n"
+                   << "mv -fT \"$stage/entry\" /opt/dimension-tools/bin/agy\n"
+                   << "chmod -R a+rX /opt/dimension-tools/antigravity\n"
+                   << "echo 'DIMENSION_SANDBOX_CLI_DONE'\n";
+        } else {
+            // Fallback: WSL direct installer (with stale staging cleanup & extended 600s timeout).
+            push_log("宿主机快传未命中，回退至沙盒直连下载 Antigravity 官方安装包（可能需数分钟）…");
+            script << "mkdir -p /opt/dimension-tools/antigravity\n"
+                   << "rm -rf /opt/dimension-tools/antigravity/.update.*\n"
+                   << "stage=$(mktemp -d /opt/dimension-tools/antigravity/.update.XXXXXX)\n"
+                   << "trap 'rm -rf -- \"$stage\"' EXIT\n"
+                   << "curl -fsSL --max-time 60 " << spec->package_or_url << " -o \"$stage/install.sh\"\n"
+                   << "mkdir \"$stage/bin\"\n"
+                   << "bash \"$stage/install.sh\" --dir \"$stage/bin\"\n"
+                   << "test -x \"$stage/bin/agy\"\n"
+                   << "\"$stage/bin/agy\" --version\n"
+                   << "chmod a+rx \"$stage/bin/agy\"\n"
+                   << "ln -s /opt/dimension-tools/antigravity/agy \"$stage/entry\"\n"
+                   << "mv -fT \"$stage/bin/agy\" /opt/dimension-tools/antigravity/agy\n"
+                   << "mv -fT \"$stage/entry\" /opt/dimension-tools/bin/agy\n"
+                   << "echo 'DIMENSION_SANDBOX_CLI_DONE'\n";
+        }
+    } else if (std::string_view(spec->install_kind) == "npm") {
+        push_log(std::string("正在从 ") + (req.registry == "official" ? "npm 官方源" : "npmmirror 国内镜像") +
+                 " 下载 " + spec->package_or_url + " 到隔离沙盒…");
+        script << "echo '>> npm install " << spec->package_or_url << " (registry: " << registry_url << ")'\n"
+               << "npm install --prefix /opt/dimension-tools/npm --no-audit --no-fund --loglevel=notice "
+               << "--registry=" << registry_url << " " << spec->package_or_url << "@latest\n"
+               << "BIN_SRC=\"\"\n"
+               << "if [ -x /opt/dimension-tools/npm/bin/" << spec->bin_name << " ]; then BIN_SRC=/opt/dimension-tools/npm/bin/" << spec->bin_name << "; "
+               << "elif [ -x /opt/dimension-tools/npm/node_modules/.bin/" << spec->bin_name << " ]; then BIN_SRC=/opt/dimension-tools/npm/node_modules/.bin/" << spec->bin_name << "; fi\n"
+               << "if [ -z \"$BIN_SRC\" ]; then echo 'ERROR: executable not found after install' >&2; exit 2; fi\n"
+               << "ln -sf \"$BIN_SRC\" /opt/dimension-tools/bin/" << spec->bin_name << "\n"
+               << "chmod -R a+rX /opt/dimension-tools\n"
+               << "echo 'DIMENSION_SANDBOX_CLI_DONE'\n";
+    } else {
+        // Hermes official Linux non-interactive installer into /opt/dimension-tools/hermes
+        push_log("正在从 Hermes 官方源下载并初始化沙盒隔离运行环境（首次可能需要 1~3 分钟）…");
+        script << "mkdir -p /opt/dimension-tools/hermes/repo /opt/dimension-tools/hermes/home /opt/dimension-tools/hermes/bin\n"
+               << "TMP_SH=/tmp/dim-hermes-install.sh\n"
+               << "curl -fsSL --max-time 60 " << spec->package_or_url << " -o \"$TMP_SH\"\n"
+               << "HOME=/opt/dimension-tools/hermes/home HERMES_HOME=/opt/dimension-tools/hermes/home "
+               << "bash \"$TMP_SH\" --non-interactive --skip-setup --skip-browser --skip-computer-use "
+               << "--dir /opt/dimension-tools/hermes/repo --hermes-home /opt/dimension-tools/hermes/home\n"
+               << "rm -f \"$TMP_SH\"\n"
+               << "HERMES_BIN=\"\"\n"
+               << "for cand in /opt/dimension-tools/hermes/home/.local/bin/hermes /opt/dimension-tools/hermes/home/bin/hermes /opt/dimension-tools/hermes/repo/.venv/bin/hermes /root/.local/bin/hermes; do "
+               << "  if [ -x \"$cand\" ]; then HERMES_BIN=\"$cand\"; break; fi; done\n"
+               << "if [ -z \"$HERMES_BIN\" ]; then echo 'ERROR: hermes binary not found after install' >&2; exit 2; fi\n"
+               << "ln -sf \"$HERMES_BIN\" /opt/dimension-tools/bin/hermes\n"
+               << "chmod -R a+rX /opt/dimension-tools\n"
+               << "echo 'DIMENSION_SANDBOX_CLI_DONE'\n";
+    }
+
+    const int timeout_sec = ((std::string_view(spec->install_kind) == "hermes_script" ||
+                              std::string_view(spec->install_kind) == "antigravity_script") &&
+                             action != "uninstall") ? 600 : 300;
+    const auto r = run_wsl_streaming_command(
+        wsl,
+        {L"-d", utf8_to_wide(req.sandbox_distribution), L"-u", L"root", L"--exec", L"/bin/sh", L"-s"},
+        script.str(),
+        timeout_sec,
+        push_log,
+        stop);
+
+    out.cancelled = r.cancelled;
+    out.exit_code = r.exit_code;
+    if (r.cancelled) {
+        out.error = "已取消沙盒 CLI 操作";
+        return out;
+    }
+    if (!r.launched || r.exit_code != 0) {
+        const std::string err_clean = strip_wsl_utf16_noise(r.stderr_text);
+        out.error = !err_clean.empty()
+            ? err_clean
+            : ("沙盒操作失败（退出码 " + std::to_string(r.exit_code) + "）");
+        return out;
+    }
+
+    // Re-probe to confirm live binary & exact version inside sandbox
+    const auto snap = probe_sandbox_cli_snapshot(wsl, req.sandbox_distribution);
+    if (const auto it = snap.items.find(req.engine_id); it != snap.items.end()) {
+        out.version = it->second.version;
+        out.binary_path = it->second.binary_path;
+        if (action != "uninstall" && !it->second.installed) {
+            out.error = "安装命令结束，但沙盒中未检测到可执行文件 /opt/dimension-tools/bin/" + std::string(spec->bin_name);
+            return out;
+        }
+    }
+    out.ok = true;
+    push_log(action == "uninstall" ? "卸载完成。" : ("已就绪：" + out.binary_path + (out.version.empty() ? "" : (" (v" + out.version + ")"))));
+    return out;
+}
+
+Json launch_sandbox_cli_login_terminal(const std::string& engine_id,
+                                       const std::filesystem::path& wsl_executable,
+                                       const std::string& sandbox_distribution) {
+    const SandboxCliSpec* spec = find_sandbox_cli_spec(engine_id);
+    if (!spec) throw std::runtime_error("不支持的沙盒 CLI 引擎：" + engine_id);
+    const fs::path wsl = resolve_wsl_exe_path(wsl_executable);
+    if (wsl.empty() || sandbox_distribution.empty()) {
+        throw std::runtime_error("隔离沙盒（WSL dimension-sandbox）未就绪");
+    }
+    const auto snap = probe_sandbox_cli_snapshot(wsl, sandbox_distribution);
+    const auto it = snap.items.find(engine_id);
+    if (it == snap.items.end() || !it->second.installed) {
+        throw std::runtime_error("该 CLI 尚未下载到隔离沙盒，请先点击「下载到沙盒」");
+    }
+
+    // Ensure engine-isolated credential home exists with dimension user ownership (1001:1002, mode 0700).
+    const std::string prep_script =
+        "mkdir -p -m 700 /var/lib/dimension-cli-homes/" + engine_id +
+        " && chown -R 1001:1002 /var/lib/dimension-cli-homes/" + engine_id;
+    (void)run_wsl_streaming_command(
+        wsl,
+        {L"-d", utf8_to_wide(sandbox_distribution), L"-u", L"root", L"--", L"/bin/sh", L"-c", utf8_to_wide(prep_script)},
+        {},
+        10);
+
+    // Launch a real visible console running official CLI login strictly inside its isolated home directory.
+    // DimensionAgent never reads, intercepts, or proxies any OAuth credential produced by the user.
+    const std::string login_banner =
+        "echo '============================================================'; "
+        "echo '  DimensionAgent 沙盒 CLI 官方账号登录 (" + std::string(spec->engine_id) + ")'; "
+        "echo '  凭据仅保存在沙盒专属目录，与宿主机及其他引擎严格隔离。'; "
+        "echo '  完成登录后直接关闭本窗口，回到设置页点击「刷新状态」即可。'; "
+        "echo '============================================================'; "
+        "export HOME=/var/lib/dimension-cli-homes/" + engine_id + "; "
+        "export PATH=/opt/dimension-tools/bin:/usr/local/bin:/usr/bin:/bin; "
+        "cd \"$HOME\"; " + std::string(spec->login_shell_cmd) + "; "
+        "echo ''; echo '登录进程已结束，按回车键关闭窗口...'; read _dummy";
+
+    std::wstring cmd_line = quote_win_arg(wsl.wstring())
+        + L" -d " + quote_win_arg(utf8_to_wide(sandbox_distribution))
+        + L" -u dimension -- /bin/sh -c " + quote_win_arg(utf8_to_wide(login_banner));
+
+    std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
+        throw std::runtime_error("无法打开沙盒登录终端窗口（Win32 错误码 " + std::to_string(GetLastError()) + "）");
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    return O{
+        {"ok", true},
+        {"scope", "sandbox"},
+        {"engineId", engine_id},
+        {"command", std::string(spec->login_shell_cmd)},
+        {"message", "已打开沙盒官方登录终端；请按窗口提示完成授权后关闭窗口并点击「刷新探测」。"}
+    };
+}
+
+Json launch_host_cli_login_terminal(const std::string& engine_id,
+                                    const std::filesystem::path& app_root) {
+    const SandboxCliSpec* spec = find_sandbox_cli_spec(engine_id);
+    if (!spec) throw std::runtime_error("不支持的 CLI 引擎：" + engine_id);
+
+    const auto harnesses = discover_cli_harnesses(app_root, {}, {}, "host_prefer");
+    std::string host_bin;
+    for (const auto& h : harnesses) {
+        if (h.id == engine_id && h.host_installed) {
+            host_bin = h.host_binary_path;
+            break;
+        }
+    }
+    if (host_bin.empty()) {
+        throw std::runtime_error("该 CLI 在沙盒与宿主机均尚未安装，请先点击「下载到沙盒」");
+    }
+
+    std::string login_args;
+    if (engine_id == "codex") login_args = " login";
+    else if (engine_id == "opencode") login_args = " auth login";
+    else if (engine_id == "kimi-code") login_args = " login";
+    else if (engine_id == "deepseek-harness") login_args = " login";
+    else if (engine_id == "hermes") login_args = " login";
+
+    const std::wstring bin_w = utf8_to_wide(host_bin);
+    const std::wstring args_w = utf8_to_wide(login_args);
+    const std::wstring id_w = utf8_to_wide(engine_id);
+    std::wstring cmd_line =
+        L"cmd.exe /k \"title DimensionAgent CLI 登录 (" + id_w + L") & "
+        L"echo ============================================================ & "
+        L"echo   DimensionAgent 宿主机 CLI 官方账号登录 (" + id_w + L") & "
+        L"echo   完成授权后关闭本窗口，回到设置页点击「刷新探测」即可。 & "
+        L"echo ============================================================ & "
+        L"\"" + bin_w + L"\"" + args_w + L"\"";
+
+    std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
+        throw std::runtime_error("无法打开宿主机登录终端窗口（Win32 错误码 " + std::to_string(GetLastError()) + "）");
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    return O{
+        {"ok", true},
+        {"scope", "host"},
+        {"engineId", engine_id},
+        {"command", host_bin + login_args},
+        {"message", "已打开宿主机官方登录终端；请完成登录后关闭窗口并点击「刷新探测」。"}
+    };
+}
+
+CliSandboxKeepAliveDaemon::~CliSandboxKeepAliveDaemon() {
+    (void)stop();
+}
+
+void CliSandboxKeepAliveDaemon::close_handle_locked() const {
+    if (process_handle_) {
+        CloseHandle(static_cast<HANDLE>(process_handle_));
+        process_handle_ = nullptr;
+    }
+    pid_ = 0;
+    started_ms_ = 0;
+}
+
+Json CliSandboxKeepAliveDaemon::status_locked() const {
+    bool running = false;
+    if (process_handle_) {
+        const DWORD wait_rc = WaitForSingleObject(static_cast<HANDLE>(process_handle_), 0);
+        if (wait_rc == WAIT_TIMEOUT) {
+            running = true;
+        } else {
+            close_handle_locked();
+        }
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::int64_t uptime_sec = (running && started_ms_ > 0 && now_ms >= started_ms_)
+        ? ((now_ms - started_ms_) / 1000)
+        : 0;
+    std::string detail;
+    if (running) {
+        detail = "沙盒常驻保活运行中（WSL " + distro_ + " 保持唤醒待命，已运行 " + std::to_string(uptime_sec) + " 秒）";
+    } else if (!last_error_.empty()) {
+        detail = last_error_;
+    } else {
+        detail = "沙盒常驻保活未启动";
+    }
+    return O{
+        {"ok", true},
+        {"running", running},
+        {"pid", static_cast<double>(pid_)},
+        {"startedMs", static_cast<double>(started_ms_)},
+        {"uptimeSec", static_cast<double>(uptime_sec)},
+        {"distro", distro_},
+        {"detail", detail}
+    };
+}
+
+Json CliSandboxKeepAliveDaemon::start(const std::filesystem::path& wsl_executable,
+                                      const std::string& sandbox_distribution) {
+    std::lock_guard lk(mu_);
+    if (process_handle_) {
+        if (WaitForSingleObject(static_cast<HANDLE>(process_handle_), 0) == WAIT_TIMEOUT) {
+            return status_locked();
+        }
+        close_handle_locked();
+    }
+    last_error_.clear();
+    distro_ = sandbox_distribution;
+
+    const fs::path wsl = resolve_wsl_exe_path(wsl_executable);
+    if (wsl.empty() || sandbox_distribution.empty()) {
+        last_error_ = "未检测到 WSL 隔离沙盒，无法启动常驻保活";
+        return O{{"ok", false}, {"running", false}, {"pid", 0.0}, {"uptimeSec", 0.0}, {"detail", last_error_}};
+    }
+
+    std::wstring cmd_line = quote_win_arg(wsl.wstring())
+        + L" -d " + quote_win_arg(utf8_to_wide(sandbox_distribution))
+        + L" -u dimension --exec /bin/sh -c \"exec sleep infinity\"";
+    std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        last_error_ = "启动沙盒常驻进程失败（Win32 错误码 " + std::to_string(GetLastError()) + "）";
+        return O{{"ok", false}, {"running", false}, {"pid", 0.0}, {"uptimeSec", 0.0}, {"detail", last_error_}};
+    }
+    CloseHandle(pi.hThread);
+    process_handle_ = pi.hProcess;
+    pid_ = pi.dwProcessId;
+    started_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return status_locked();
+}
+
+Json CliSandboxKeepAliveDaemon::stop() {
+    std::lock_guard lk(mu_);
+    if (process_handle_) {
+        HANDLE h = static_cast<HANDLE>(process_handle_);
+        TerminateProcess(h, 0);
+        WaitForSingleObject(h, 2000);
+        close_handle_locked();
+    }
+    last_error_.clear();
+    return status_locked();
+}
+
+Json CliSandboxKeepAliveDaemon::status() const {
+    std::lock_guard lk(mu_);
+    return status_locked();
+}
+
+static std::wstring autostart_command(fs::path launcher = {}) {
+    std::error_code ec;
+    if (launcher.empty()) {
+        wchar_t self[32768]{};
+        const auto size = GetModuleFileNameW(nullptr, self, 32768);
+        if (!size || size >= 32768) return {};
+        const fs::path backend(self);
+        for (auto dir = backend.parent_path(); !dir.empty() && dir != dir.root_path(); dir = dir.parent_path()) {
+            const auto candidate = dir / L"DImensionagent.exe";
+            const auto config = dir / L"native-client.json";
+            if (!fs::is_regular_file(candidate, ec) || !fs::is_regular_file(config, ec)) continue;
+            try {
+                auto contents = read_small_file(config);
+                if (contents.starts_with("\xEF\xBB\xBF")) contents.erase(0, 3);
+                const auto rel = jstr(Json::parse(contents), "backend");
+                if (!rel.empty() && fs::equivalent(dir / utf8_to_wide(rel), backend, ec)) {
+                    launcher = candidate;
+                    break;
+                }
+            } catch (const std::exception&) { continue; }
+        }
+    }
+    if (launcher.empty() || !fs::is_regular_file(launcher, ec)) return {};
+    return L"\"" + launcher.wstring() + L"\" --background";
+}
+
+bool query_windows_autostart_enabled() {
+    const auto expected = autostart_command();
+    if (expected.empty()) return false;
+    wchar_t value[32768]{};
+    DWORD size = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                        L"DimensionAgent", RRF_RT_REG_SZ, nullptr, value, &size) == ERROR_SUCCESS &&
+           _wcsicmp(expected.c_str(), value) == 0;
+}
+
+Json set_windows_autostart_enabled(bool enable, const std::filesystem::path& host_exe_path) {
+    HKEY key = nullptr;
+    const LONG open_rc = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &key, nullptr);
+    if (open_rc != ERROR_SUCCESS) {
+        throw std::runtime_error("无法访问 Windows 当前用户开机启动项注册表（错误码 " + std::to_string(open_rc) + "）");
+    }
+    if (!enable) {
+        const LONG del_rc = RegDeleteValueW(key, L"DimensionAgent");
+        RegCloseKey(key);
+        if (del_rc != ERROR_SUCCESS && del_rc != ERROR_FILE_NOT_FOUND) {
+            throw std::runtime_error("关闭开机自启失败（错误码 " + std::to_string(del_rc) + "）");
+        }
+        return O{{"ok", true}, {"enabled", false}, {"message", "已关闭随 Windows 开机常驻启动"}};
+    }
+
+    const auto val = autostart_command(host_exe_path);
+    if (val.empty()) {
+        RegCloseKey(key);
+        throw std::runtime_error("未找到此安装的桌面启动器，无法设置开机自启");
+    }
+    const LONG set_rc = RegSetValueExW(
+        key, L"DimensionAgent", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(val.c_str()),
+        static_cast<DWORD>((val.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (set_rc != ERROR_SUCCESS) {
+        throw std::runtime_error("写入开机自启项失败（错误码 " + std::to_string(set_rc) + "）");
+    }
+    return O{
+        {"ok", true},
+        {"enabled", true},
+        {"command", wide_to_utf8(val)},
+        {"message", "已开启随 Windows 开机常驻启动（登录系统后自动唤醒 DimensionAgent 与沙盒）"}
+    };
+}
 
 std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::path& app_root,
                                                          const std::filesystem::path& wsl_executable,
-                                                         const std::string& sandbox_distribution) {
-    (void)wsl_executable;
-    (void)sandbox_distribution;
-
+                                                         const std::string& sandbox_distribution,
+                                                         std::string_view execution_policy) {
     const fs::path local_app = utf8_to_path(env_var_utf8(L"LOCALAPPDATA"));
     const fs::path user_prof = utf8_to_path(env_var_utf8(L"USERPROFILE"));
     const fs::path app_data  = utf8_to_path(env_var_utf8(L"APPDATA"));
@@ -1390,7 +2705,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         d.installed = !d.binary_path.empty();
         const fs::path h_home = fs::is_directory(local_app / L"hermes", ec) ? (local_app / L"hermes") : (user_prof / L".hermes");
         probe_hermes_native(d, h_home);
-        if (d.installed && d.native_configured && !app_root.empty()) {
+        if (d.installed && d.native_configured && !app_root.empty() && execution_policy != "sandbox_only") {
             maybe_prewarm_hermes_gateway(d.binary_path, h_home);
         }
         list.push_back(std::move(d));
@@ -1415,7 +2730,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         list.push_back(std::move(d));
     }
 
-    // 2. Kimi Code
+    // 3. Kimi Code
     {
         CliHarnessDescriptor d;
         d.id = "kimi-code";
@@ -1432,7 +2747,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         list.push_back(std::move(d));
     }
 
-    // 3. Claude Code
+    // 4. Claude Code
     {
         CliHarnessDescriptor d;
         d.id = "claude-code";
@@ -1455,7 +2770,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         list.push_back(std::move(d));
     }
 
-    // 4. Codex
+    // 5. Codex
     {
         CliHarnessDescriptor d;
         d.id = "codex";
@@ -1485,7 +2800,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         list.push_back(std::move(d));
     }
 
-    // 5. OpenCode
+    // 6. OpenCode
     {
         CliHarnessDescriptor d;
         d.id = "opencode";
@@ -1506,7 +2821,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         list.push_back(std::move(d));
     }
 
-    // 6. Qwen Code & Gemini CLI
+    // 7. Qwen Code & Gemini CLI
     {
         CliHarnessDescriptor q;
         q.id = "qwen-code";
@@ -1532,6 +2847,107 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         g.native_model_groups.push_back({"GEMINI 原生订阅", "", {"gemini-2.5-pro", "gemini-2.5-flash"}});
         g.native_status_label = g.native_configured ? "已连接 Google 原生账号" : (g.installed ? "已安装 · 支持 Google 账号登录" : "未安装");
         list.push_back(std::move(g));
+
+        // 8. Google Antigravity CLI (agy)
+        CliHarnessDescriptor agy;
+        agy.id = "antigravity";
+        agy.name = "Antigravity (agy)";
+        agy.platform = "windows";
+        agy.supports_custom_model = false;
+        agy.binary_path = first_existing_file({
+            local_app / L"agy" / L"bin" / L"agy.exe",
+            user_prof / L".local" / L"bin" / L"agy.exe",
+            local_app / L"Programs" / L"Antigravity" / L"agy.exe"
+        });
+        if (agy.binary_path.empty()) agy.binary_path = find_in_windows_path({L"agy.exe", L"agy.cmd"});
+        agy.installed = !agy.binary_path.empty();
+        probe_antigravity_native(agy, user_prof / L".gemini" / L"antigravity-cli", user_prof / L".gemini" / L"antigravity");
+        list.push_back(std::move(agy));
+    }
+
+    // Record host discovery results and enrich with WSL Bubblewrap sandbox discovery
+    SandboxCliSnapshot sb_snap;
+    const bool probe_sandbox = !sandbox_distribution.empty() && !resolve_wsl_exe_path(wsl_executable).empty();
+    if (probe_sandbox) {
+        sb_snap = probe_sandbox_cli_snapshot(wsl_executable, sandbox_distribution);
+    }
+
+    const std::string policy = (execution_policy == "sandbox_only" || execution_policy == "host_prefer")
+        ? std::string(execution_policy)
+        : std::string("sandbox_first");
+
+    for (auto& d : list) {
+        d.host_installed = d.installed;
+        d.host_binary_path = d.binary_path;
+        d.host_version = d.version;
+        d.host_native_configured = d.native_configured;
+
+        if (const auto* spec = find_sandbox_cli_spec(d.id)) {
+            d.sandbox_installable = true;
+            d.sandbox_install_package = spec->package_or_url;
+        } else {
+            d.sandbox_installable = false;
+        }
+
+        if (const auto it = sb_snap.items.find(d.id); it != sb_snap.items.end()) {
+            d.sandbox_installed = it->second.installed;
+            d.sandbox_binary_path = it->second.binary_path;
+            d.sandbox_version = it->second.version;
+            d.sandbox_native_configured = it->second.native_configured;
+        }
+
+        // Resolve active execution carrier according to execution_policy
+        bool pick_sandbox = false;
+        bool pick_host = false;
+        if (policy == "sandbox_only") {
+            pick_sandbox = d.sandbox_installed;
+        } else if (policy == "host_prefer") {
+            pick_host = d.host_installed;
+            if (!pick_host) pick_sandbox = d.sandbox_installed;
+        } else {
+            // sandbox_first (Option A default): always prefer Bubblewrap sandbox when installed
+            pick_sandbox = d.sandbox_installed;
+            if (!pick_sandbox) pick_host = d.host_installed;
+        }
+
+        if (pick_sandbox) {
+            if (d.id == "antigravity") {
+                d.native_default_model.clear();
+                for (auto& group : d.native_model_groups)
+                    group.group_title += "（来自宿主机，沙盒可用性待验证）";
+            }
+            d.installed = true;
+            d.platform = "wsl";
+            d.binary_path = d.sandbox_binary_path;
+            d.version = d.sandbox_version;
+            d.native_configured = d.sandbox_native_configured;
+            d.execution_mode = "sandbox";
+            d.native_status_label = d.id == "antigravity"
+                ? (d.sandbox_native_configured ? "沙盒已装 · 发现配置，登录待验证" : "沙盒已装 · 登录待验证")
+                : d.sandbox_native_configured
+                ? ("沙盒隔离已就绪 · 原生账号已登录" + (d.sandbox_version.empty() ? std::string{} : (" · v" + d.sandbox_version)))
+                : ((d.supports_custom_model ? "沙盒隔离已就绪 · 维度 API 即开即用" : "沙盒隔离已就绪 · 点击沙盒登录授权后可用") +
+                   (d.sandbox_version.empty() ? std::string{} : (" · v" + d.sandbox_version)));
+        } else if (pick_host) {
+            d.installed = true;
+            d.platform = "windows";
+            d.binary_path = d.host_binary_path;
+            d.version = d.host_version;
+            d.native_configured = d.host_native_configured;
+            d.execution_mode = "host";
+        } else {
+            d.installed = false;
+            d.platform = (policy == "sandbox_only") ? "wsl" : "windows";
+            d.binary_path.clear();
+            d.version.clear();
+            d.native_configured = false;
+            d.execution_mode.clear();
+            if (policy == "sandbox_only" && d.host_installed) {
+                d.native_status_label = "仅宿主机已装（当前策略要求沙盒，请在设置中下载到沙盒）";
+            } else {
+                d.native_status_label = "未安装（可在设置 → 工坊 CLI 与沙盒一键下载）";
+            }
+        }
     }
 
     return list;
@@ -1638,16 +3054,177 @@ bool parse_cli_json_event(std::string_view engine_id,
     }
     if (!obj_val.is_object()) return false;
 
+    (void)engine_id;
     out_event = NormalizedCliEvent{};
     const std::string type = jstr(obj_val, "type");
-    out_event.session_id = jstr(obj_val, "session_id", jstr(obj_val, "sessionId", jstr(obj_val, "thread_id")));
+    const std::string role = jstr(obj_val, "role");
+    const std::string event_name = jstr(obj_val, "event");
+    out_event.session_id = jstr(obj_val, "conversation_id",
+                                jstr(obj_val, "session_id", jstr(obj_val, "sessionId", jstr(obj_val, "thread_id"))));
 
-    // 1. Init / Thread start (Hermes, DeepSeek Harness, Claude Code, Kimi Code, Codex)
+    // 0. Antigravity CLI (`agy --output-format stream-json`): {"event":"init"|"step_update"|"result", ...}
+    if (!event_name.empty()) {
+        if (event_name == "init") {
+            out_event.kind = "init";
+            if (const auto* init_obj = obj_val.find("init"); init_obj && init_obj->is_object()) {
+                const auto cid = jstr(*init_obj, "conversation_id");
+                if (!cid.empty()) out_event.session_id = cid;
+            }
+            return true;
+        }
+        if (event_name == "step_update") {
+            const auto* su = obj_val.find("step_update");
+            const Json& holder = (su && su->is_object()) ? *su : obj_val;
+            const auto cid = jstr(holder, "conversation_id");
+            if (!cid.empty()) out_event.session_id = cid;
+            const std::string stype = jstr(holder, "step_type");
+            const std::string state = jstr(holder, "state");
+            out_event.duration_ms = static_cast<std::int64_t>(jnum(holder, "duration_seconds", 0.0) * 1000.0);
+            if (const auto* usage = holder.find("usage"); usage && usage->is_object()) {
+                out_event.input_tokens = static_cast<std::int64_t>(jnum(*usage, "input_tokens", 0));
+                out_event.output_tokens = static_cast<std::int64_t>(jnum(*usage, "output_tokens", 0));
+            }
+            if (stype == "agent_response") {
+                const std::string td = jstr(holder, "text_delta", jstr(holder, "text"));
+                if (!td.empty()) {
+                    out_event.kind = "commentary";
+                    out_event.text = td;
+                    return true;
+                }
+                const std::string th = jstr(holder, "thinking_delta", jstr(holder, "thinking"));
+                if (!th.empty()) {
+                    out_event.kind = "thinking";
+                    out_event.text = th;
+                    return true;
+                }
+                out_event.kind = (out_event.input_tokens > 0 || out_event.output_tokens > 0) ? "usage" : "init";
+                return true;
+            }
+            if (stype == "thinking" || stype == "thought" || stype == "reasoning") {
+                const std::string th = jstr(holder, "thinking_delta", jstr(holder, "text_delta", jstr(holder, "text")));
+                out_event.kind = th.empty() ? "init" : "thinking";
+                out_event.text = th;
+                return true;
+            }
+            if (stype == "tool") {
+                out_event.kind = (state == "ACTIVE") ? "tool_start" : "tool_end";
+                out_event.tool_call_id = "agy_step_" + std::to_string(static_cast<int>(jnum(holder, "step_index", 0)));
+                out_event.tool_name = jstr(holder, "tool_name");
+                if (const auto* ti = holder.find("tool_info"); ti && ti->is_object()) {
+                    if (out_event.tool_name.empty()) out_event.tool_name = jstr(*ti, "name");
+                    if (const auto* params = ti->find("parameters"); params && !params->is_null()) {
+                        out_event.args_json = params->is_string() ? params->as_string() : params->dump();
+                    }
+                    out_event.output = jstr(*ti, "output");
+                    if (const auto* err = ti->find("error"); err && err->is_object()) {
+                        out_event.is_error = true;
+                        if (out_event.output.empty()) out_event.output = jstr(*err, "message", jstr(*err, "type"));
+                    }
+                }
+                classify_tool_for_rollup(out_event.tool_name, out_event.args_json,
+                                         out_event.action_category, out_event.display_verb, out_event.display_target);
+                return true;
+            }
+            out_event.kind = "init";
+            return true;
+        }
+        if (event_name == "result") {
+            const auto* res = obj_val.find("result");
+            const Json& holder = (res && res->is_object()) ? *res : obj_val;
+            const auto cid = jstr(holder, "conversation_id");
+            if (!cid.empty()) out_event.session_id = cid;
+            const std::string status = jstr(holder, "status");
+            const std::string err_msg = jstr(holder, "error");
+            out_event.kind = "result";
+            out_event.is_error = (!status.empty() && status != "SUCCESS") || !err_msg.empty();
+            out_event.exit_code = out_event.is_error ? 1 : 0;
+            out_event.text = out_event.is_error
+                ? (err_msg.empty() ? jstr(holder, "response", "Antigravity CLI 执行未成功：" + status) : err_msg)
+                : jstr(holder, "response", jstr(holder, "text"));
+            out_event.duration_ms = static_cast<std::int64_t>(jnum(holder, "duration_seconds", 0.0) * 1000.0);
+            if (const auto* usage = holder.find("usage"); usage && usage->is_object()) {
+                out_event.input_tokens = static_cast<std::int64_t>(jnum(*usage, "input_tokens", 0));
+                out_event.output_tokens = static_cast<std::int64_t>(jnum(*usage, "output_tokens", 0));
+            }
+            return true;
+        }
+    }
+
+    // 1. Init / Thread start / Meta envelopes (Hermes, DeepSeek Harness, Claude Code, Kimi Code 2.5+, Codex)
     if ((type == "system" && jstr(obj_val, "subtype") == "init") || type == "thread.started" ||
-        type == "init" || type == "session" ||
-        (engine_id == "kimi-code" && type == "session.resume_hint" && jstr(obj_val, "role") == "meta")) {
+        type == "init" || type == "session" || role == "meta") {
         out_event.kind = "init";
         return true;
+    }
+
+    // 1b. Kimi Code 2.5+ / OpenAI-style role-based stream-json frames (no top-level "type")
+    if (type.empty() && !role.empty()) {
+        if (role == "tool") {
+            out_event.kind = "tool_end";
+            out_event.tool_call_id = jstr(obj_val, "tool_call_id", jstr(obj_val, "id"));
+            out_event.tool_name = jstr(obj_val, "name");
+            out_event.output = jstr(obj_val, "content");
+            out_event.is_error = jbool(obj_val, "is_error", false);
+            classify_tool_for_rollup(out_event.tool_name, "",
+                                     out_event.action_category, out_event.display_verb, out_event.display_target);
+            return true;
+        }
+        if (role == "assistant") {
+            std::string combined_text;
+            std::string combined_thinking;
+            if (const auto* content = obj_val.find("content")) {
+                if (content->is_string()) {
+                    combined_text = content->as_string();
+                } else if (content->is_array()) {
+                    for (const auto& item : content->as_array()) {
+                        if (!item.is_object()) continue;
+                        const auto itype = jstr(item, "type");
+                        if (itype == "text") {
+                            combined_text += jstr(item, "text");
+                        } else if (itype == "think" || itype == "thinking") {
+                            combined_thinking += jstr(item, "think", jstr(item, "thinking", jstr(item, "text")));
+                        }
+                    }
+                }
+            }
+            if (!combined_text.empty()) {
+                out_event.kind = "commentary";
+                out_event.text = std::move(combined_text);
+                return true;
+            }
+            if (const auto* tcs = obj_val.find("tool_calls"); tcs && tcs->is_array() && !tcs->as_array().empty()) {
+                const auto& first = tcs->as_array().front();
+                if (first.is_object()) {
+                    out_event.kind = "tool_start";
+                    out_event.tool_call_id = jstr(first, "id");
+                    if (const auto* fn = first.find("function"); fn && fn->is_object()) {
+                        out_event.tool_name = jstr(*fn, "name");
+                        if (const auto* args = fn->find("arguments"); args && !args->is_null()) {
+                            out_event.args_json = args->is_string() ? args->as_string() : args->dump();
+                        }
+                    } else {
+                        out_event.tool_name = jstr(first, "name");
+                    }
+                    classify_tool_for_rollup(out_event.tool_name, out_event.args_json,
+                                             out_event.action_category, out_event.display_verb, out_event.display_target);
+                    return true;
+                }
+            }
+            if (combined_thinking.empty()) {
+                combined_thinking = jstr(obj_val, "reasoning_content", jstr(obj_val, "thinking"));
+            }
+            if (!combined_thinking.empty()) {
+                out_event.kind = "thinking";
+                out_event.text = std::move(combined_thinking);
+                return true;
+            }
+            out_event.kind = "init";
+            return true;
+        }
+        if (role == "system" || role == "user") {
+            out_event.kind = "init";
+            return true;
+        }
     }
 
     // 2. Hermes streaming text delta: {"type":"text","text":"..."}
@@ -1870,38 +3447,60 @@ static std::string find_kimi_session(const fs::path& bucket, const std::string& 
 
 PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                                              const std::vector<CliHarnessDescriptor>& provided_discovered) {
+    const std::string effective_policy = req.require_sandbox
+        ? std::string("sandbox_only")
+        : (req.execution_policy.empty() ? std::string("sandbox_first") : req.execution_policy);
     const auto discovered = provided_discovered.empty()
-        ? discover_cli_harnesses(req.app_root, req.wsl_executable, req.sandbox_distribution)
+        ? discover_cli_harnesses(req.app_root, req.wsl_executable, req.sandbox_distribution, effective_policy)
         : provided_discovered;
+
+    auto is_usable = [&](const CliHarnessDescriptor& d) {
+        if (req.require_sandbox) {
+            return (d.installed && d.platform == "wsl") || d.sandbox_installed;
+        }
+        return d.installed;
+    };
 
     const CliHarnessDescriptor* chosen = nullptr;
     if (!req.engine_id.empty() && req.engine_id != "auto") {
         for (const auto& d : discovered) {
-            if (d.id == req.engine_id && d.installed) {
+            if (d.id == req.engine_id && is_usable(d)) {
                 chosen = &d;
                 break;
             }
         }
     }
-    if (!chosen && req.require_exact_engine) throw std::runtime_error("选定的 CLI 引擎不可用：" + req.engine_id);
+    if (!chosen && req.require_exact_engine) {
+        if (req.require_sandbox) {
+            throw std::runtime_error("当前工位要求沙盒隔离，但所选 CLI（" + req.engine_id + "）尚未下载到隔离沙盒；请前往「客户端设置 → 工坊 CLI 与沙盒」一键下载");
+        }
+        throw std::runtime_error("选定的 CLI 引擎不可用：" + req.engine_id);
+    }
     if (!chosen) {
-        // Auto fallback priority: Hermes -> Kimi Code -> Claude Code -> Codex -> OpenCode -> Qwen -> Gemini
         for (const auto& d : discovered) {
-            if (d.installed) {
+            if (is_usable(d)) {
                 chosen = &d;
                 break;
             }
         }
     }
     if (!chosen) {
-        throw std::runtime_error("未检测到可用的满血 CLI 引擎（请确认 Hermes 或 Kimi Code 已就绪）");
+        if (req.require_sandbox) {
+            throw std::runtime_error("当前工位要求在 Bubblewrap 沙盒内运行 CLI，但沙盒中尚未下载任何官方 CLI；请前往「客户端设置 → 工坊 CLI 与沙盒」一键下载");
+        }
+        throw std::runtime_error("未检测到可用的满血 CLI 引擎（可在「客户端设置 → 工坊 CLI 与沙盒」一键下载到沙盒）");
     }
 
     PreparedCliInvocation inv;
     inv.engine_id = chosen->id;
     inv.engine_name = chosen->name;
-    inv.platform = chosen->platform;
-    inv.binary_path = chosen->binary_path;
+    const bool force_sandbox_carrier = req.require_sandbox || (chosen->platform == "wsl") ||
+        (effective_policy == "sandbox_only" && chosen->sandbox_installed);
+    inv.platform = force_sandbox_carrier ? "wsl" : chosen->platform;
+    inv.binary_path = (force_sandbox_carrier && !chosen->sandbox_binary_path.empty())
+        ? chosen->sandbox_binary_path
+        : chosen->binary_path;
+    const bool in_bwrap = (inv.platform == "wsl");
 
     std::error_code ec;
     const fs::path ws_abs = fs::absolute(req.workspace_dir, ec);
@@ -1945,6 +3544,19 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                 ? (chosen->native_default_model + " · 原生默认")
                 : (inv.engine_name + " · 原生默认")));
 
+    auto map_image_for_cli = [&](const fs::path& img_p) -> std::string {
+        const fs::path abs_img = fs::absolute(img_p, ec);
+        if (!in_bwrap) return path_to_utf8(abs_img);
+        std::error_code rel_ec;
+        const fs::path rel = fs::relative(abs_img, ws_abs, rel_ec);
+        if (!rel_ec && !rel.empty()) {
+            std::string r = path_to_utf8(rel);
+            std::replace(r.begin(), r.end(), '\\', '/');
+            if (!r.starts_with("..")) return "/workspace/" + r;
+        }
+        return {};
+    };
+
     // Authoritative Model Identity Override: prevents CLI shells (such as Hermes's SOUL.md / DEFAULT_AGENT_IDENTITY
     // "You are Hermes Agent, built by Nous Research") from impersonating the routed underlying LLM!
     std::string effective_prompt;
@@ -1957,9 +3569,13 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
     }
     effective_prompt += req.prompt;
     if (!req.image_paths.empty()) {
-        effective_prompt += "\n\n【用户粘贴/附带的视觉参考图（请直接读取查看画面构图、文字、报错或设计细节）】";
+        std::string img_block;
         for (const auto& img_p : req.image_paths) {
-            effective_prompt += "\n- " + path_to_utf8(fs::absolute(img_p, ec));
+            const std::string mapped = map_image_for_cli(img_p);
+            if (!mapped.empty()) img_block += "\n- " + mapped;
+        }
+        if (!img_block.empty()) {
+            effective_prompt += "\n\n【用户粘贴/附带的视觉参考图（请直接读取查看画面构图、文字、报错或设计细节）】" + img_block;
         }
     }
     // Sweep stale query-*.txt files (>30 min old) from interrupted prior processes
@@ -1985,35 +3601,44 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         if (!qout) throw std::runtime_error("无法保存 CLI 任务原文");
     }
 
-    // Build bundled lightweight CLI toolkit PATH prepend
-    std::vector<std::string> extra_paths;
-    auto push_dir_if_exists = [&](const fs::path& dir) {
-        if (!dir.empty() && fs::is_directory(dir, ec)) extra_paths.push_back(path_to_utf8(fs::absolute(dir, ec)));
-    };
-    push_dir_if_exists(runtime_directory(req.app_root) / L"cli-kit" / L"bin");
-    push_dir_if_exists(req.app_root / L"runtime" / L"node");
+    const std::string ws_arg_path = in_bwrap ? std::string("/workspace") : path_to_utf8(ws_abs);
+    const std::string task_dir_arg_path = in_bwrap ? std::string("/run/dim-task") : path_to_utf8(inv.isolated_home_dir);
+    const std::string query_file_arg_path = in_bwrap
+        ? ("/run/dim-task/" + path_to_utf8(inv.temp_query_file.filename()))
+        : path_to_utf8(fs::absolute(inv.temp_query_file, ec));
+
+    // Build bundled lightweight CLI toolkit PATH prepend (Windows host only)
     const fs::path user_prof = utf8_to_path(env_var_utf8(L"USERPROFILE"));
     const fs::path local_app = utf8_to_path(env_var_utf8(L"LOCALAPPDATA"));
-    push_dir_if_exists(user_prof / L".kimi-code" / L"bin");
-    push_dir_if_exists(local_app / L"hermes" / L"bin");
-    push_dir_if_exists(L"C:\\Program Files\\Git\\cmd");
+    if (!in_bwrap) {
+        std::vector<std::string> extra_paths;
+        auto push_dir_if_exists = [&](const fs::path& dir) {
+            if (!dir.empty() && fs::is_directory(dir, ec)) extra_paths.push_back(path_to_utf8(fs::absolute(dir, ec)));
+        };
+        push_dir_if_exists(runtime_directory(req.app_root) / L"cli-kit" / L"bin");
+        push_dir_if_exists(req.app_root / L"runtime" / L"node");
+        push_dir_if_exists(user_prof / L".kimi-code" / L"bin");
+        push_dir_if_exists(local_app / L"hermes" / L"bin");
+        push_dir_if_exists(L"C:\\Program Files\\Git\\cmd");
 
-    if (!extra_paths.empty()) {
-        std::string joined;
-        for (std::size_t i = 0; i < extra_paths.size(); ++i) {
-            if (i > 0) joined.push_back(';');
-            joined += extra_paths[i];
+        if (!extra_paths.empty()) {
+            std::string joined;
+            for (std::size_t i = 0; i < extra_paths.size(); ++i) {
+                if (i > 0) joined.push_back(';');
+                joined += extra_paths[i];
+            }
+            inv.env_overrides.emplace_back("PATH_PREPEND", joined);
         }
-        inv.env_overrides.emplace_back("PATH_PREPEND", joined);
     }
     inv.env_overrides.emplace_back("PYTHONIOENCODING", "utf-8");
     inv.env_overrides.emplace_back("PYTHONUTF8", "1");
     inv.env_overrides.emplace_back("PYTHONUNBUFFERED", "1");
     inv.env_overrides.emplace_back("NO_COLOR", "1");
 
-    // Shared helpers: discover cross-harness skill directories and zero-latency MCP bridge across ALL CLIs
+    // Shared helpers: discover cross-harness skill directories and zero-latency MCP bridge across ALL CLIs (host only)
     auto collect_cross_harness_skill_roots = [&]() {
         std::vector<std::string> roots;
+        if (in_bwrap) return roots;
         auto add_root = [&](const fs::path& dir) {
             if (!dir.empty() && fs::is_directory(dir, ec)) {
                 const std::string abs_u8 = path_to_utf8(fs::absolute(dir, ec));
@@ -2056,7 +3681,7 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
     };
 
     fs::path mcp_node_exe, mcp_bridge_mjs;
-    if (!req.app_root.empty()) {
+    if (!in_bwrap && !req.app_root.empty()) {
         const fs::path ptr_json = req.app_root / L"native-client.json";
         if (fs::is_regular_file(ptr_json, ec)) {
             try {
@@ -2070,20 +3695,19 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         if (!fs::is_regular_file(mcp_node_exe, ec)) mcp_node_exe = req.app_root / L"runtime" / L"node" / L"node.exe";
         if (!fs::is_regular_file(mcp_bridge_mjs, ec)) mcp_bridge_mjs = req.app_root / L"runtime" / L"cross-harness-mcp.mjs";
     }
-    const bool has_cross_mcp_bridge = !req.constraints.forbid_skills &&
+    const bool has_cross_mcp_bridge = !in_bwrap &&
+                                      !req.read_only_reception &&
+                                      !req.constraints.forbid_skills &&
                                       fs::is_regular_file(mcp_node_exe, ec) &&
                                       fs::is_regular_file(mcp_bridge_mjs, ec);
     const std::string mcp_node_u8 = has_cross_mcp_bridge ? path_to_utf8(fs::absolute(mcp_node_exe, ec)) : std::string{};
     const std::string mcp_bridge_u8 = has_cross_mcp_bridge ? path_to_utf8(fs::absolute(mcp_bridge_mjs, ec)) : std::string{};
 
     if (inv.engine_id == "hermes") {
-        // Use global native HERMES_HOME directly (do NOT set an external HERMES_HOME):
-        // External HERMES_HOME triggers Hermes's _prepare_borrowed_launch -> 160s+ full uv venv rebuild
-        // and spawns an isolated cold Gateway per Bot. Using the native home shares the single installed
-        // Python environment (0s sync) and the warm Multiplex Gateway (0s cold start), while `-c <title>`
-        // keeps every Bot & thread session strictly isolated.
-        const fs::path global_hermes = fs::is_directory(local_app / L"hermes", ec) ? (local_app / L"hermes") : (user_prof / L".hermes");
-        maybe_prewarm_hermes_gateway(inv.binary_path, global_hermes);
+        if (!in_bwrap) {
+            const fs::path global_hermes = fs::is_directory(local_app / L"hermes", ec) ? (local_app / L"hermes") : (user_prof / L".hermes");
+            maybe_prewarm_hermes_gateway(inv.binary_path, global_hermes);
+        }
 
         inv.env_overrides.emplace_back("HERMES_ACCEPT_HOOKS", "1");
         inv.env_overrides.emplace_back("HERMES_QUIET", "1");
@@ -2109,22 +3733,35 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         ).substr(0, 6);
         const std::string hermes_sess_title = sess_slug + "-" + route_sig;
 
-        inv.args = {
-            "chat",
-            "--query-file", path_to_utf8(inv.temp_query_file),
-            "--format", "stream-json",
-            "--in", path_to_utf8(ws_abs),
-            "-c", hermes_sess_title,
-            "--create-if-missing",
-            "--accept-hooks",
-            "--yolo",
-            "--checkpoints",
-            "--source", "tool"
-        };
-        if (req.constraints.forbid_skills) inv.args.push_back("--ignore-rules");
-        if (req.constraints.forbid_tests && req.constraints.forbid_network) {
-            inv.args.push_back("-t");
-            inv.args.push_back("file");
+        if (req.read_only_reception) {
+            inv.args = {
+                "chat",
+                "--query-file", query_file_arg_path,
+                "--oneshot",
+                "--format", "stream-json",
+                "--in", ws_arg_path,
+                "--max-turns", "1",
+                "--source", "tool",
+                "--ignore-rules"
+            };
+        } else {
+            inv.args = {
+                "chat",
+                "--query-file", query_file_arg_path,
+                "--format", "stream-json",
+                "--in", ws_arg_path,
+                "-c", hermes_sess_title,
+                "--create-if-missing",
+                "--accept-hooks",
+                "--source", "tool",
+                "--yolo",
+                "--checkpoints"
+            };
+            if (req.constraints.forbid_skills) inv.args.push_back("--ignore-rules");
+            if (req.constraints.forbid_tests && req.constraints.forbid_network) {
+                inv.args.push_back("-t");
+                inv.args.push_back("file");
+            }
         }
         if (!req.work_slot_model.reasoning_effort.empty()) {
             inv.args.push_back("--reasoning");
@@ -2162,14 +3799,15 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         // llm-deepseek, dsh-breeze-tts, .credentials.yaml, and AGENTS.md with zero file copy,
         // while --patch <temp_patch> and --session-id keep per-run configuration & session isolated.
         const fs::path global_dsh = user_prof / L".dsh";
-        inv.env_overrides.emplace_back("DSH_PERMISSION_MODE", "danger-full-access");
+        const std::string dsh_perm_preset = req.read_only_reception ? "read-only" : "danger-full-access";
+        inv.env_overrides.emplace_back("DSH_PERMISSION_MODE", dsh_perm_preset);
 
         std::ostringstream patch;
         patch << "- id: permission\n"
               << "  name: \"@deepseek-ai/dsh-permission-presets\"\n"
               << "  config:\n"
-              << "    defaultPreset: danger-full-access\n";
-        if (req.constraints.forbid_skills) {
+              << "    defaultPreset: " << dsh_perm_preset << "\n";
+        if (req.constraints.forbid_skills || req.read_only_reception) {
             patch << "- id: skill\n"
                   << "  name: \"@deepseek-ai/dsh-skill\"\n"
                   << "  disabled: true\n";
@@ -2246,7 +3884,7 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                   << "  name: \"@deepseek-ai/dsh-deepseek-account-platform\"\n"
                   << "  disabled: false\n"
                   << "  config:\n"
-                  << "    desktopPlatform: win32\n"
+                  << "    desktopPlatform: " << (in_bwrap ? "linux" : "win32") << "\n"
                   << "- id: agent-default-model\n"
                   << "  name: \"@deepseek-ai/dsh-agent-default-model\"\n"
                   << "  config:\n"
@@ -2262,13 +3900,13 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         wopts.existing_root = inv.isolated_home_dir;
         atomic_write_file(patch_file, patch.str(), wopts);
 
-        // Multi-turn session adoption: verify persisted session inside ~/.dsh/sessions/--<cwd>--/<session-id>
+        // Multi-turn session adoption (Windows host mode)
         const std::string cwd_sig = deterministic_uuid_from_key(path_to_utf8(ws_abs)).substr(0, 6);
         const fs::path map_dir = inv.isolated_home_dir / L"session-map";
         fs::create_directories(map_dir, ec);
         inv.session_id_map_file = map_dir / utf8_to_path(sess_slug + "-" + cwd_sig + ".id");
         std::string existing_sess_id;
-        if (fs::is_regular_file(inv.session_id_map_file, ec)) {
+        if (!in_bwrap && fs::is_regular_file(inv.session_id_map_file, ec)) {
             existing_sess_id = trim_copy(read_small_file(inv.session_id_map_file));
             if (!existing_sess_id.empty()) {
                 bool found_on_disk = false;
@@ -2295,7 +3933,7 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
 
         inv.args = {
             "--profile", "headless",
-            "--patch", path_to_utf8(patch_file),
+            "--patch", in_bwrap ? (task_dir_arg_path + "/dimension-run.patch.yml") : path_to_utf8(patch_file),
             "--json"
         };
         if (!existing_sess_id.empty()) {
@@ -2308,10 +3946,12 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         const fs::path global_kimi = user_prof / L".kimi-code";
         if (inject_work_model) {
             // Isolated KIMI_CODE_HOME ONLY when injecting custom Dimension Work API config.toml
-            copy_file_sync(global_kimi / L"credentials.json", inv.isolated_home_dir / L"credentials.json");
-            copy_file_sync(global_kimi / L"device_id", inv.isolated_home_dir / L"device_id");
-            copy_file_sync(global_kimi / L"region", inv.isolated_home_dir / L"region");
-            inv.env_overrides.emplace_back("KIMI_CODE_HOME", path_to_utf8(inv.isolated_home_dir));
+            if (!in_bwrap) {
+                copy_file_sync(global_kimi / L"credentials.json", inv.isolated_home_dir / L"credentials.json");
+                copy_file_sync(global_kimi / L"device_id", inv.isolated_home_dir / L"device_id");
+                copy_file_sync(global_kimi / L"region", inv.isolated_home_dir / L"region");
+            }
+            inv.env_overrides.emplace_back("KIMI_CODE_HOME", task_dir_arg_path);
 
             const std::string alias = "dimension_work/" + req.work_slot_model.model;
             const std::size_t ctx_win = req.work_slot_model.context_window_tokens >= 8192
@@ -2330,58 +3970,63 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             wopts.existing_root = inv.isolated_home_dir;
             atomic_write_file(inv.isolated_home_dir / L"config.toml", toml.str(), wopts);
 
-            // Preserve user's mcp.json and merge cross_harness MCP server inside isolated home
-            Json::Object mcp_servers;
-            if (fs::is_regular_file(global_kimi / L"mcp.json", ec)) {
-                try {
-                    const auto existing_mcp = Json::parse(read_small_file(global_kimi / L"mcp.json"));
-                    if (existing_mcp.is_object()) {
-                        if (const auto* srv = existing_mcp.find("mcpServers"); srv && srv->is_object()) {
-                            mcp_servers = srv->as_object();
+            // Preserve user's mcp.json and merge cross_harness MCP server inside isolated home (host only)
+            if (!in_bwrap) {
+                Json::Object mcp_servers;
+                if (fs::is_regular_file(global_kimi / L"mcp.json", ec)) {
+                    try {
+                        const auto existing_mcp = Json::parse(read_small_file(global_kimi / L"mcp.json"));
+                        if (existing_mcp.is_object()) {
+                            if (const auto* srv = existing_mcp.find("mcpServers"); srv && srv->is_object()) {
+                                mcp_servers = srv->as_object();
+                            }
                         }
-                    }
-                } catch (...) {}
+                    } catch (...) {}
+                }
+                if (has_cross_mcp_bridge) {
+                    mcp_servers["cross_harness"] = Json::Object{
+                        {"command", mcp_node_u8},
+                        {"args", Json::Array{mcp_bridge_u8}}
+                    };
+                }
+                if (!mcp_servers.empty()) {
+                    atomic_write_file(inv.isolated_home_dir / L"mcp.json",
+                                      Json(Json::Object{{"mcpServers", std::move(mcp_servers)}}).dump(), wopts);
+                }
             }
-            if (has_cross_mcp_bridge) {
-                mcp_servers["cross_harness"] = Json::Object{
-                    {"command", mcp_node_u8},
-                    {"args", Json::Array{mcp_bridge_u8}}
-                };
-            }
-            if (!mcp_servers.empty()) {
-                atomic_write_file(inv.isolated_home_dir / L"mcp.json",
-                                  Json(Json::Object{{"mcpServers", std::move(mcp_servers)}}).dump(), wopts);
-            }
-
         }
         const auto home = inject_work_model ? inv.isolated_home_dir : global_kimi;
         const auto map_dir = inv.isolated_home_dir / "session-map";
         fs::create_directories(map_dir, ec);
         inv.session_id_map_file = map_dir / (deterministic_uuid_from_key(req.session_key + "|" +
             path_to_utf8(ws_abs) + "|" + req.model_source + "|" + inv.model_label) + ".id");
-        const auto bucket = kimi_session_bucket(home, ws_abs);
-        auto id = trim_copy(read_small_file(inv.session_id_map_file));
-        if (id.size() == 36) id = "session_" + id;
-        if (!bucket.empty() && id.starts_with("session_") && id.size() == 44 &&
-            id.find_first_not_of("abcdefABCDEF0123456789-", 8) == std::string::npos &&
-            fs::is_regular_file(bucket / id / "state.json", ec)) inv.args = {"-S", id};
+        if (!in_bwrap && !req.read_only_reception) {
+            const auto bucket = kimi_session_bucket(home, ws_abs);
+            auto id = trim_copy(read_small_file(inv.session_id_map_file));
+            if (id.size() == 36) id = "session_" + id;
+            if (!bucket.empty() && id.starts_with("session_") && id.size() == 44 &&
+                id.find_first_not_of("abcdefABCDEF0123456789-", 8) == std::string::npos &&
+                fs::is_regular_file(bucket / id / "state.json", ec)) inv.args = {"-S", id};
+        }
         const auto model = inject_work_model ? "dimension_work/" + req.work_slot_model.model : req.native_model;
         if (!model.empty()) { inv.args.push_back("-m"); inv.args.push_back(model); }
-        if (req.constraints.forbid_skills) {
+        if (req.constraints.forbid_skills || req.read_only_reception) {
             const fs::path empty_skills = inv.isolated_home_dir / L"empty-skills";
             fs::create_directories(empty_skills, ec);
             inv.args.push_back("--skills-dir");
-            inv.args.push_back(path_to_utf8(empty_skills));
+            inv.args.push_back(in_bwrap ? (task_dir_arg_path + "/empty-skills") : path_to_utf8(empty_skills));
         } else {
             if (fs::is_directory(ws_abs / L".kimi" / L"skills", ec)) {
                 inv.args.push_back("--skills-dir");
-                inv.args.push_back(path_to_utf8(ws_abs / L".kimi" / L"skills"));
+                inv.args.push_back(in_bwrap ? "/workspace/.kimi/skills" : path_to_utf8(ws_abs / L".kimi" / L"skills"));
             }
             for (const auto& sr : collect_cross_harness_skill_roots()) {
                 inv.args.push_back("--skills-dir");
                 inv.args.push_back(sr);
             }
         }
+        // Note: Kimi Code forbids combining `--plan` with `-p/--prompt` (`Cannot combine --prompt with --plan.`).
+        // In read-only reception mode we omit `--yolo`/`--auto`/`-S`, attach an empty skills dir, and run in the isolated sandbox.
         inv.args.push_back("--output-format");
         inv.args.push_back("stream-json");
         inv.args.push_back("-p");
@@ -2394,13 +4039,24 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                 inv.env_overrides.emplace_back("ANTHROPIC_API_KEY", req.work_slot_model.api_key);
             }
         }
-        inv.args = {
-            "-p", effective_prompt,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--session-id", sess_uuid
-        };
+        if (req.read_only_reception) {
+            // Pure read-only orchestration mode: disable local disk/bash tools and pass prompt via stdin.
+            inv.args = {
+                "-p",
+                "--output-format", "stream-json",
+                "--verbose",
+                "--tools", ""
+            };
+            inv.stdin_payload = effective_prompt;
+        } else {
+            inv.args = {
+                "-p", effective_prompt,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--session-id", sess_uuid
+            };
+        }
         if (has_cross_mcp_bridge) {
             const fs::path claude_mcp = inv.isolated_home_dir / L"claude-cross-mcp.json";
             const Json mcp_doc = Json::Object{
@@ -2429,15 +4085,19 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                 inv.env_overrides.emplace_back("OPENAI_API_KEY", req.work_slot_model.api_key);
             }
         }
-        inv.args = {"exec", "--json", "--full-auto", "--skip-git-repo-check"};
-        if (req.constraints.forbid_skills) {
-            inv.args.push_back("--ignore-rules");
-        } else if (has_cross_mcp_bridge) {
-            inv.args.push_back("--trust");
-            inv.args.push_back("-c");
-            inv.args.push_back("mcp_servers.cross_harness.command=\"" + toml_escape_basic(mcp_node_u8) + "\"");
-            inv.args.push_back("-c");
-            inv.args.push_back("mcp_servers.cross_harness.args=[\"" + toml_escape_basic(mcp_bridge_u8) + "\"]");
+        inv.args = req.read_only_reception
+            ? std::vector<std::string>{"exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check"}
+            : std::vector<std::string>{"exec", "--json", "--full-auto", "--skip-git-repo-check"};
+        if (!req.read_only_reception) {
+            if (req.constraints.forbid_skills) {
+                inv.args.push_back("--ignore-rules");
+            } else if (has_cross_mcp_bridge) {
+                inv.args.push_back("--trust");
+                inv.args.push_back("-c");
+                inv.args.push_back("mcp_servers.cross_harness.command=\"" + toml_escape_basic(mcp_node_u8) + "\"");
+                inv.args.push_back("-c");
+                inv.args.push_back("mcp_servers.cross_harness.args=[\"" + toml_escape_basic(mcp_bridge_u8) + "\"]");
+            }
         }
         const std::string chosen_m = inject_work_model ? req.work_slot_model.model : req.native_model;
         if (!chosen_m.empty()) {
@@ -2445,10 +4105,18 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             inv.args.push_back(chosen_m);
         }
         for (const auto& img_p : req.image_paths) {
-            inv.args.push_back("-i");
-            inv.args.push_back(path_to_utf8(fs::absolute(img_p, ec)));
+            const std::string mapped = map_image_for_cli(img_p);
+            if (!mapped.empty()) {
+                inv.args.push_back("-i");
+                inv.args.push_back(mapped);
+            }
         }
-        inv.args.push_back(effective_prompt);
+        if (req.read_only_reception) {
+            inv.args.push_back("-");
+            inv.stdin_payload = effective_prompt;
+        } else {
+            inv.args.push_back(effective_prompt);
+        }
     } else if (inv.engine_id == "opencode") {
         if (inject_work_model) {
             inv.env_overrides.emplace_back("OPENAI_BASE_URL", host_openai_url);
@@ -2463,6 +4131,48 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             inv.args.push_back(chosen_m);
         }
         inv.args.push_back(effective_prompt);
+    } else if (inv.engine_id == "antigravity") {
+        // Google Antigravity CLI (`agy`): headless `--print --input-format text --output-format stream-json`
+        // Receives arbitrarily long UTF-8 prompts cleanly over stdin (avoids Windows argv length limits).
+        if (req.read_only_reception) {
+            inv.args = {
+                "--print",
+                "--input-format", "text",
+                "--output-format", "stream-json",
+                "--mode", "plan",
+                "--disable-slash-commands"
+            };
+        } else {
+            inv.args = {
+                "--print",
+                "--input-format", "text",
+                "--output-format", "stream-json",
+                "--dangerously-skip-permissions"
+            };
+            const fs::path map_dir = inv.isolated_home_dir / L"session-map";
+            fs::create_directories(map_dir, ec);
+            const std::string cwd_sig = deterministic_uuid_from_key(path_to_utf8(ws_abs)).substr(0, 6);
+            inv.session_id_map_file = map_dir / utf8_to_path(sess_slug + "-" + cwd_sig + ".id");
+            if (!in_bwrap && fs::is_regular_file(inv.session_id_map_file, ec)) {
+                const std::string prev_cid = trim_copy(read_small_file(inv.session_id_map_file));
+                if (!prev_cid.empty() && prev_cid.size() <= 128 &&
+                    prev_cid.find_first_of(" \t\r\n") == std::string::npos) {
+                    inv.args.push_back("--conversation");
+                    inv.args.push_back(prev_cid);
+                }
+            }
+        }
+        const std::string chosen_m = req.native_model;
+        if (!chosen_m.empty()) {
+            inv.args.push_back("--model");
+            inv.args.push_back(chosen_m);
+        }
+        const std::string effort = req.work_slot_model.reasoning_effort;
+        if (effort == "low" || effort == "medium" || effort == "high" || effort == "xhigh" || effort == "max") {
+            inv.args.push_back("--effort");
+            inv.args.push_back(effort);
+        }
+        inv.stdin_payload = effective_prompt;
     } else {
         // qwen-code / gemini-cli
         if (inject_work_model) {
@@ -2472,7 +4182,9 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                 inv.env_overrides.emplace_back("GEMINI_API_KEY", req.work_slot_model.api_key);
             }
         }
-        inv.args = {"-p", effective_prompt, "--output-format", "stream-json", "--yolo"};
+        inv.args = req.read_only_reception
+            ? std::vector<std::string>{"-p", effective_prompt, "--output-format", "stream-json"}
+            : std::vector<std::string>{"-p", effective_prompt, "--output-format", "stream-json", "--yolo"};
         const std::string chosen_m = inject_work_model ? req.work_slot_model.model : req.native_model;
         if (!chosen_m.empty()) {
             inv.args.push_back("-m");
@@ -2480,19 +4192,99 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         }
     }
 
-    // Avoid the Windows argument limit. stdin and query-file engines already
-    // receive the full text without putting it on their command line.
+    // Avoid shell/process command-line length limits.
+    // Windows .cmd/.bat go through cmd.exe (~8191 char cap); native .exe supports 32,767 UTF-16 chars;
+    // WSL/Linux bwrap safely handles large argv (>100 KB). Stdin & query-file engines are unaffected.
     const auto extension = ascii_lower(path_to_utf8(utf8_to_path(inv.binary_path).extension()));
-    const bool file_prompt = req.file_prompt_for_batch && (extension == ".cmd" || extension == ".bat");
-    if ((file_prompt || effective_prompt.size() > 6000) && inv.stdin_payload.empty()) {
+    const bool is_batch_script = !in_bwrap && (extension == ".cmd" || extension == ".bat");
+    const bool file_prompt = is_batch_script && req.file_prompt_for_batch;
+    const bool exceeds_arg_limit = in_bwrap
+        ? (effective_prompt.size() > 96000U)
+        : (is_batch_script
+            ? (effective_prompt.size() > 6000U)
+            : (utf8_to_wide(effective_prompt).size() > 24000U));
+    if ((file_prompt || exceeds_arg_limit) && inv.stdin_payload.empty()) {
         for (auto& argument : inv.args) {
             if (argument == effective_prompt) {
                 argument = "请先完整读取本次任务说明文件（UTF-8），按其中的职责、用户原文和后续纠正执行："
-                    + path_to_utf8(fs::absolute(inv.temp_query_file));
+                    + query_file_arg_path;
                 break;
             }
         }
     }
+
+    // Build Bubblewrap (bwrap) namespace sandbox command when running inside WSL sandbox
+    if (in_bwrap) {
+        inv.use_bwrap_sandbox = true;
+        inv.linux_workspace_path = windows_path_to_wsl_path(ws_abs, req.sandbox_distribution);
+        inv.linux_task_dir = windows_path_to_wsl_path(inv.isolated_home_dir, req.sandbox_distribution);
+        inv.linux_home_path = (req.model_source == "native")
+            ? ("/var/lib/dimension-cli-homes/" + inv.engine_id)
+            : std::string{};
+
+        auto add_bw = [&](std::initializer_list<std::string> items) {
+            for (const auto& s : items) inv.bwrap_args.push_back(s);
+        };
+        add_bw({
+            "/usr/bin/bwrap",
+            "--unshare-all",
+            "--share-net",
+            "--die-with-parent",
+            "--new-session",
+            "--cap-drop", "ALL",
+            "--ro-bind", "/usr", "/usr",
+            "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/sbin", "/sbin",
+            "--symlink", "usr/lib", "/lib",
+            "--symlink", "usr/lib64", "/lib64",
+            "--ro-bind-try", "/etc/passwd", "/etc/passwd",
+            "--ro-bind-try", "/etc/group", "/etc/group",
+            "--ro-bind-try", "/etc/hosts", "/etc/hosts",
+            "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+            "--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+            "--ro-bind-try", "/etc/ssl", "/etc/ssl",
+            "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
+            "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+            "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+            "--ro-bind-try", "/etc/localtime", "/etc/localtime",
+            "--ro-bind", "/opt/dimension-tools", "/opt/dimension-tools",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--tmpfs", "/run",
+            "--dir", "/run/dim-task",
+            "--bind", inv.linux_task_dir, "/run/dim-task",
+            req.read_only_reception ? "--ro-bind" : "--bind", inv.linux_workspace_path, "/workspace"
+        });
+        if (!inv.linux_home_path.empty()) {
+            add_bw({"--dir", "/home/dimension", "--bind", inv.linux_home_path, "/home/dimension"});
+        } else {
+            add_bw({"--dir", "/tmp/dim-home", "--symlink", "/tmp/dim-home", "/home/dimension"});
+        }
+        add_bw({
+            "--uid", "1001",
+            "--gid", "1002",
+            "--clearenv",
+            "--setenv", "PATH", "/opt/dimension-tools/bin:/usr/local/bin:/usr/bin:/bin",
+            "--setenv", "HOME", "/home/dimension",
+            "--setenv", "USER", "dimension",
+            "--setenv", "LOGNAME", "dimension",
+            "--setenv", "LANG", "C.UTF-8",
+            "--setenv", "LC_ALL", "C.UTF-8",
+            "--setenv", "TERM", "dumb",
+            "--setenv", "TMPDIR", "/tmp"
+        });
+        for (const auto& [pk, pv] : build_sandbox_proxy_env_overrides()) {
+            add_bw({"--setenv", pk, pv});
+        }
+        for (const auto& [ek, ev] : inv.env_overrides) {
+            if (ek == "PATH_PREPEND" || ek == "PATH" || ek == "HOME") continue;
+            add_bw({"--setenv", ek, ev});
+        }
+        add_bw({"--chdir", "/workspace", "--", inv.binary_path});
+        for (const auto& a : inv.args) inv.bwrap_args.push_back(a);
+    }
+
     return inv;
 }
 
@@ -2502,7 +4294,8 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
     const auto started_at = std::chrono::steady_clock::now();
     PreparedCliInvocation inv = prepare_cli_invocation(req);
     std::string kimi_marker;
-    if (inv.engine_id == "kimi-code" && std::find(inv.args.begin(), inv.args.end(), "-S") == inv.args.end()) {
+    if (!inv.use_bwrap_sandbox && !req.read_only_reception && inv.engine_id == "kimi-code" &&
+        std::find(inv.args.begin(), inv.args.end(), "-S") == inv.args.end()) {
         kimi_marker = "DimensionSession-" + deterministic_uuid_from_key(req.session_key +
             std::to_string(started_at.time_since_epoch().count()));
         inv.args.back().insert(0, "[" + kimi_marker + "]\n");
@@ -2526,23 +4319,50 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
     const fs::path ws_abs = fs::absolute(req.workspace_dir, ec);
     fs::create_directories(ws_abs, ec);
 
-    // Take pre-execution snapshot to detect created/updated files and build Red/Green Diffs
-    const auto before_snap = snapshot_workspace(ws_abs);
+    // Take pre-execution snapshot to detect created/updated files and build Red/Green Diffs.
+    // Read-only reception calls never touch the workspace, so skip disk traversal completely.
+    const auto before_snap = req.read_only_reception ? std::map<std::string, FileSnap>{} : snapshot_workspace(ws_abs);
 
-    // Construct full Windows command line (.cmd wrappers run via cmd.exe /d /s /c "\"...\"")
-    const bool is_cmd_script = ascii_lower(inv.binary_path).ends_with(".cmd") ||
-                               ascii_lower(inv.binary_path).ends_with(".bat");
-    std::wstring inner_cmd = quote_win_arg(utf8_to_wide(inv.binary_path));
-    for (const auto& a : inv.args) {
-        inner_cmd.push_back(L' ');
-        inner_cmd += quote_win_arg(utf8_to_wide(a));
+    std::wstring cmd_line;
+    bool unc_batch = false;
+    if (inv.use_bwrap_sandbox) {
+        const fs::path wsl_exe = resolve_wsl_exe_path(req.wsl_executable);
+        if (wsl_exe.empty() || req.sandbox_distribution.empty()) {
+            throw std::runtime_error("隔离沙盒（WSL dimension-sandbox）未就绪，无法启动沙盒 CLI");
+        }
+        cmd_line = quote_win_arg(wsl_exe.wstring())
+            + L" -d " + quote_win_arg(utf8_to_wide(req.sandbox_distribution))
+            + L" -u root --exec ";
+        if (!inv.linux_home_path.empty()) {
+            const std::string prep = "mkdir -p -m 700 \"$1\" && chown 1001:1002 \"$1\" && shift && exec \"$@\"";
+            cmd_line += L"/bin/sh -c " + quote_win_arg(utf8_to_wide(prep)) + L" _ "
+                + quote_win_arg(utf8_to_wide(inv.linux_home_path));
+            for (const auto& ba : inv.bwrap_args) {
+                cmd_line.push_back(L' ');
+                cmd_line += quote_win_arg(utf8_to_wide(ba));
+            }
+        } else {
+            for (std::size_t i = 0; i < inv.bwrap_args.size(); ++i) {
+                if (i > 0) cmd_line.push_back(L' ');
+                cmd_line += quote_win_arg(utf8_to_wide(inv.bwrap_args[i]));
+            }
+        }
+    } else {
+        // Construct full Windows command line (.cmd wrappers run via cmd.exe /d /s /c "\"...\"")
+        const bool is_cmd_script = ascii_lower(inv.binary_path).ends_with(".cmd") ||
+                                   ascii_lower(inv.binary_path).ends_with(".bat");
+        std::wstring inner_cmd = quote_win_arg(utf8_to_wide(inv.binary_path));
+        for (const auto& a : inv.args) {
+            inner_cmd.push_back(L' ');
+            inner_cmd += quote_win_arg(utf8_to_wide(a));
+        }
+        unc_batch = is_cmd_script && ws_abs.root_name().wstring().starts_with(L"\\\\");
+        cmd_line = unc_batch
+            ? L"cmd.exe /d /e:on /v:off /s /c \"pushd \"%DIMENSION_CLI_WORKDIR%\" && " + inner_cmd + L"\""
+            : is_cmd_script
+            ? (L"cmd.exe /d /s /c \"" + inner_cmd + L"\"")
+            : inner_cmd;
     }
-    const bool unc_batch = is_cmd_script && ws_abs.root_name().wstring().starts_with(L"\\\\");
-    std::wstring cmd_line = unc_batch
-        ? L"cmd.exe /d /e:on /v:off /s /c \"pushd \"%DIMENSION_CLI_WORKDIR%\" && " + inner_cmd + L"\""
-        : is_cmd_script
-        ? (L"cmd.exe /d /s /c \"" + inner_cmd + L"\"")
-        : inner_cmd;
 
     SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     HANDLE out_r = nullptr, out_w = nullptr, err_r = nullptr, err_w = nullptr, in_r = nullptr, in_w = nullptr;
@@ -2578,17 +4398,29 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
 
     std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
     mutable_cmd.push_back(L'\0');
-    std::vector<std::pair<std::string, std::string>> merged_env = inv.env_overrides;
-    merged_env.emplace_back("PYTHONUTF8", "1");
-    merged_env.emplace_back("PYTHONIOENCODING", "utf-8");
-    if (unc_batch) merged_env.emplace_back("DIMENSION_CLI_WORKDIR", path_to_utf8(ws_abs));
-    std::wstring env_block = build_environment_block(merged_env);
-    const std::wstring cwd_w = unc_batch ? inv.isolated_home_dir.wstring() : ws_abs.wstring();
+    std::wstring env_block;
+    LPVOID env_ptr = nullptr;
+    DWORD create_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
+    std::wstring cwd_w;
+    if (inv.use_bwrap_sandbox) {
+        // Bubblewrap isolates & injects the exact clean Linux environment via --clearenv --setenv.
+        cwd_w = inv.isolated_home_dir.wstring();
+    } else {
+        std::vector<std::pair<std::string, std::string>> merged_env = build_host_proxy_env_overrides();
+        for (const auto& kv : inv.env_overrides) merged_env.push_back(kv);
+        merged_env.emplace_back("PYTHONUTF8", "1");
+        merged_env.emplace_back("PYTHONIOENCODING", "utf-8");
+        if (unc_batch) merged_env.emplace_back("DIMENSION_CLI_WORKDIR", path_to_utf8(ws_abs));
+        env_block = build_environment_block(merged_env);
+        env_ptr = env_block.data();
+        create_flags |= CREATE_UNICODE_ENVIRONMENT;
+        cwd_w = unc_batch ? inv.isolated_home_dir.wstring() : ws_abs.wstring();
+    }
 
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT,
-                        env_block.data(), cwd_w.c_str(), &si, &pi)) {
+                        create_flags,
+                        env_ptr, cwd_w.c_str(), &si, &pi)) {
         fs::remove(inv.temp_query_file, ec);
         throw std::runtime_error("无法启动 CLI 进程 " + inv.engine_name + "（Win32 错误码 " + std::to_string(GetLastError()) + "）");
     }
@@ -2668,11 +4500,20 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
         }
     };
 
+    auto now_steady_ms = []() -> std::int64_t {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    std::atomic<bool> stdout_done{false};
+    std::atomic<bool> stderr_done{false};
+    std::atomic<std::int64_t> last_pipe_io_ms{now_steady_ms()};
+
     std::jthread stdout_reader([&]() {
         std::string pending;
         char buf[4096];
         DWORD n = 0;
         while (ReadFile(out_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            last_pipe_io_ms.store(now_steady_ms(), std::memory_order_relaxed);
             pending.append(buf, n);
             std::size_t nl = 0;
             while ((nl = pending.find('\n')) != std::string::npos) {
@@ -2683,17 +4524,39 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
             }
         }
         if (!pending.empty()) handle_stdout_line(pending);
+        stdout_done.store(true, std::memory_order_release);
     });
 
     std::jthread stderr_reader([&]() {
         char buf[4096];
+        std::string line_buf;
         DWORD n = 0;
-        while (ReadFile(err_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+        auto flush_err_line = [&](std::string& lb) {
+            const std::string clean = inv.use_bwrap_sandbox ? strip_wsl_utf16_noise(lb) : lb;
+            lb.clear();
+            if (clean.empty()) return;
             std::lock_guard lk(state_mu);
             if (stderr_capture.size() < 64U * 1024U) {
-                stderr_capture.append(buf, std::min<std::size_t>(n, 64U * 1024U - stderr_capture.size()));
+                if (!stderr_capture.empty()) stderr_capture.push_back('\n');
+                stderr_capture.append(clean.data(), std::min<std::size_t>(clean.size(), 64U * 1024U - stderr_capture.size()));
+            }
+        };
+        while (ReadFile(err_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            last_pipe_io_ms.store(now_steady_ms(), std::memory_order_relaxed);
+            if (!inv.use_bwrap_sandbox) {
+                std::lock_guard lk(state_mu);
+                if (stderr_capture.size() < 64U * 1024U) {
+                    stderr_capture.append(buf, std::min<std::size_t>(n, 64U * 1024U - stderr_capture.size()));
+                }
+            } else {
+                for (DWORD i = 0; i < n; ++i) {
+                    if (buf[i] == '\n') flush_err_line(line_buf);
+                    else if (buf[i] != '\r') line_buf.push_back(buf[i]);
+                }
             }
         }
+        if (inv.use_bwrap_sandbox && !line_buf.empty()) flush_err_line(line_buf);
+        stderr_done.store(true, std::memory_order_release);
     });
 
     const int timeout_sec = std::clamp(req.timeout_seconds, 15, 3600);
@@ -2723,6 +4586,27 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
     out.exit_code = static_cast<int>(exit_code);
 
     if (stdin_writer.joinable()) stdin_writer.join();
+
+    // Drain any remaining buffered pipe output after the main CLI process exits,
+    // then cancel blocked synchronous ReadFile calls if a detached grandchild daemon
+    // (such as `hermes gateway run --idle-exit`) inherited the pipe write handles.
+    const auto drain_start = now_steady_ms();
+    while (!(stdout_done.load(std::memory_order_acquire) && stderr_done.load(std::memory_order_acquire))) {
+        const auto now_ms = now_steady_ms();
+        const auto since_exit = now_ms - drain_start;
+        const auto since_io = now_ms - last_pipe_io_ms.load(std::memory_order_relaxed);
+        if (since_exit >= 1200 || (since_exit >= 350 && since_io >= 300)) {
+            if (!stdout_done.load(std::memory_order_acquire) && stdout_reader.joinable()) {
+                CancelSynchronousIo(static_cast<HANDLE>(stdout_reader.native_handle()));
+            }
+            if (!stderr_done.load(std::memory_order_acquire) && stderr_reader.joinable()) {
+                CancelSynchronousIo(static_cast<HANDLE>(stderr_reader.native_handle()));
+            }
+        }
+        if (since_exit >= 2500) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
     if (stdout_reader.joinable()) stdout_reader.join();
     if (stderr_reader.joinable()) stderr_reader.join();
     fs::remove(inv.temp_query_file, ec);
@@ -2761,7 +4645,9 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
 
     out.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started_at).count();
-    out.file_deltas = diff_workspace_snapshots(ws_abs, before_snap);
+    if (!req.read_only_reception) {
+        out.file_deltas = diff_workspace_snapshots(ws_abs, before_snap);
+    }
 
     if (out.final_response.empty()) {
         out.final_response = !streamed_text_acc.empty() ? streamed_text_acc : plain_stdout_fallback;
@@ -2783,6 +4669,2115 @@ CliHarnessRunResult run_cli_harness(const CliHarnessRunRequest& req,
     }
 
     return out;
+}
+
+namespace {
+
+std::string format_reception_message_block(const ModelMessage& msg) {
+    std::ostringstream tb;
+    if (msg.role == "user") {
+        tb << "### [USER]\n" << msg.content;
+        if (!msg.images.empty()) {
+            tb << "\n（附带 " << msg.images.size() << " 张参考图）";
+        }
+    } else if (msg.role == "assistant") {
+        tb << "### [ASSISTANT]\n";
+        if (!msg.content.empty()) tb << msg.content << "\n";
+        for (const auto& tc : msg.tool_calls) {
+            tb << "<dimension_tool_call>\n{\"name\":" << Json(tc.name).dump()
+               << ",\"arguments\":" << (tc.arguments.empty() ? "{}" : tc.arguments)
+               << "}\n</dimension_tool_call>\n";
+        }
+    } else if (msg.role == "tool") {
+        tb << "### [TOOL RESULT id=" << msg.tool_call_id << "]\n" << msg.content;
+    } else {
+        tb << "### [" << msg.role << "]\n" << msg.content;
+    }
+    std::string item = tb.str();
+    if (item.size() > 48000U) {
+        item = item.substr(0, 44000U) + "\n…（单条回执过长已截断）…\n" + item.substr(item.size() - 2000U);
+    }
+    return item;
+}
+
+std::string extract_time_anchor_from_system(std::string_view sys) {
+    static constexpr std::string_view kPrefix = "当前本地时间：";
+    const auto pos = sys.find(kPrefix);
+    if (pos == std::string_view::npos) return {};
+    const auto val_start = pos + kPrefix.size();
+    const auto end_pos = sys.find("）", val_start);
+    if (end_pos == std::string_view::npos || end_pos <= val_start || end_pos - val_start > 96U) return {};
+    return std::string(sys.substr(val_start, end_pos - val_start));
+}
+
+std::string normalize_primary_system_for_fingerprint(std::string_view sys) {
+    std::string s(sys);
+    // Strip volatile per-minute time anchor and per-turn user char count so KV Prompt Cache stays warm across turns.
+    static constexpr std::string_view kTimePrefix = "（当前本地时间：";
+    static constexpr std::string_view kCloseParen = "）";
+    if (const auto p = s.find(kTimePrefix); p != std::string::npos) {
+        const auto end = s.find(kCloseParen, p + kTimePrefix.size());
+        if (end != std::string::npos && end - p < 128U) {
+            s.replace(p, (end + kCloseParen.size()) - p, "（当前本地时间：<DYNAMIC>）");
+        }
+    }
+    static constexpr std::string_view kLenPrefix = "（当前对方输入约 ";
+    static constexpr std::string_view kLenSuffix = " 字）";
+    if (const auto p = s.find(kLenPrefix); p != std::string::npos) {
+        const auto end = s.find(kLenSuffix, p + kLenPrefix.size());
+        if (end != std::string::npos && end - p < 64U) {
+            s.replace(p, (end + kLenSuffix.size()) - p, "（当前对方输入约 <N> 字）");
+        }
+    }
+    return s;
+}
+
+std::string hash128_hex(std::string_view data) {
+    std::uint64_t h1 = 14695981039346656037ULL;
+    std::uint64_t h2 = 1099511628211ULL ^ 0x9e3779b97f4a7c15ULL;
+    for (unsigned char c : data) {
+        h1 ^= c;
+        h1 *= 1099511628211ULL;
+        h2 ^= static_cast<std::uint64_t>(c) + 0x517cc1b727220a95ULL + (h2 << 6U) + (h2 >> 2U);
+    }
+    char buf[48]{};
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx-%zu",
+                  static_cast<unsigned long long>(h1),
+                  static_cast<unsigned long long>(h2),
+                  data.size());
+    return std::string(buf);
+}
+
+} // namespace
+
+void ReceptionTextStreamFilter::reset() {
+    inside_tool_tag_ = false;
+    emitted_any_ = false;
+    pending_.clear();
+}
+
+void ReceptionTextStreamFilter::feed(std::string_view chunk,
+                                     const std::function<void(std::string_view)>& on_text) {
+    static constexpr std::string_view kOpenTag = "<dimension_tool_call>";
+    static constexpr std::string_view kCloseTag = "</dimension_tool_call>";
+
+    if (chunk.empty()) return;
+    pending_.append(chunk);
+
+    while (!pending_.empty()) {
+        if (inside_tool_tag_) {
+            const auto close_pos = pending_.find(kCloseTag);
+            if (close_pos != std::string::npos) {
+                pending_.erase(0, close_pos + kCloseTag.size());
+                inside_tool_tag_ = false;
+                continue;
+            }
+            // Keep only a short tail that could match the prefix of kCloseTag.
+            const std::size_t keep = kCloseTag.size() - 1U;
+            if (pending_.size() > keep) {
+                pending_.erase(0, pending_.size() - keep);
+            }
+            break;
+        }
+
+        const auto lt_pos = pending_.find('<');
+        if (lt_pos == std::string::npos) {
+            if (on_text) on_text(pending_);
+            emitted_any_ = true;
+            pending_.clear();
+            break;
+        }
+        if (lt_pos > 0) {
+            if (on_text) on_text(std::string_view(pending_).substr(0, lt_pos));
+            emitted_any_ = true;
+            pending_.erase(0, lt_pos);
+        }
+
+        // Now pending_[0] == '<'
+        if (pending_.size() >= kOpenTag.size()) {
+            if (pending_.compare(0, kOpenTag.size(), kOpenTag) == 0) {
+                pending_.erase(0, kOpenTag.size());
+                inside_tool_tag_ = true;
+                continue;
+            }
+            // Not kOpenTag: emit '<' and continue scanning the rest.
+            if (on_text) on_text(std::string_view(pending_).substr(0, 1));
+            emitted_any_ = true;
+            pending_.erase(0, 1);
+            continue;
+        }
+
+        // pending_.size() < kOpenTag.size(): check if it is still a valid prefix of kOpenTag.
+        if (kOpenTag.compare(0, pending_.size(), pending_) == 0) {
+            break; // Hold until next chunk resolves the potential tag.
+        }
+        if (on_text) on_text(std::string_view(pending_).substr(0, 1));
+        emitted_any_ = true;
+        pending_.erase(0, 1);
+    }
+}
+
+void ReceptionTextStreamFilter::flush(const std::function<void(std::string_view)>& on_text) {
+    if (!inside_tool_tag_ && !pending_.empty()) {
+        if (on_text) on_text(pending_);
+        emitted_any_ = true;
+    }
+    pending_.clear();
+}
+
+std::string build_cli_reception_prompt(const std::vector<ModelMessage>& messages,
+                                       const std::vector<ModelTool>& tools,
+                                       std::string_view context_feature,
+                                       std::string_view engine_id) {
+    const bool is_chat_mode = (context_feature == "chat" || context_feature == "group");
+    std::ostringstream out;
+    if (is_chat_mode) {
+        out << "【DimensionAgent 原生角色对话接待通道（只读纯对话模式）】\n"
+            << "说明：你当前作为 DimensionAgent 对话角色的底层推理大脑，请完全代入下方系统提示词中的角色人设、关系与场景自然接话。\n"
+            << "安全规则：本轮只输出角色对话回复（以及必要时下方声明的原生工具调用），切勿调用你自身内置的任何文件读写、Shell、代码执行、计划模式或外部系统工具，也不要提及 CLI 工具外壳名称。\n\n";
+    } else {
+        out << "【DimensionAgent 工坊原生接待与总指挥通道（纯对话统筹中继，严禁自行动手）】\n"
+            << "说明：你当前担任 DimensionAgent Work 工坊的接待与总指挥（Lead / Commander），直接接入原生后端状态机。\n"
+            << "【最高铁律】：你当前进程所在的 `cli-reception-sandbox` 只是空白只读中继目录，**绝不是用户的真实项目工作区**（严禁在方案或派单参数中提及或写入 `cli-reception-sandbox` 路径，调用 `dispatch_native_cli` 时后端会自动绑定用户的真实项目目录）！\n"
+            << "1. **绝对禁止调用你 CLI 自身内置的任何工具**（包括 Write / Edit / Read / Glob / Shell / Bash / ExitPlanMode / 写入计划文件等，任何自行动手或写计划文件都是无效的！）；\n"
+            << "2. 当下方「可调用的 Dimension 原生后端工具」为空（需求讨论阶段）时，你只能纯文字对话，并严格按照下方工坊指令末尾要求输出确认问句；\n"
+            << "3. 当下方提供了 `dispatch_native_cli` 等 Dimension 原生工具（执行阶段）时，**必须且只能通过输出 `<dimension_tool_call>` 块（块内严格放单个纯 JSON 对象，严禁再套 `<tool_name>` 或 `<arguments>` XML 子标签）**来调用 `dispatch_native_cli` 派单给真实工作区的底层 CLI 工程师干活，以及调用 `read_file` / `verify_file` 验收和 `task_finish` 交付！\n\n";
+    }
+
+    std::string sys_combined;
+    std::vector<std::string> turn_blocks;
+    turn_blocks.reserve(messages.size());
+
+    for (const auto& msg : messages) {
+        if (msg.role == "system") {
+            if (!msg.content.empty()) {
+                if (!sys_combined.empty()) sys_combined += "\n\n";
+                sys_combined += msg.content;
+            }
+            continue;
+        }
+        turn_blocks.push_back(format_reception_message_block(msg));
+    }
+
+    if (!sys_combined.empty()) {
+        if (sys_combined.size() > 48000U) {
+            sys_combined = sys_combined.substr(0, 48000U) + "\n…（系统上下文已按接待预算截断）";
+        }
+        out << (is_chat_mode ? "=== 系统角色设定与对话指令 ===\n" : "=== 系统角色与工坊指令 ===\n")
+            << sys_combined << "\n\n";
+    }
+
+    if (!tools.empty()) {
+        out << "=== 本轮可调用的 Dimension 原生后端工具 ===\n"
+            << "当你需要调用下方任一原生工具时，请严格输出以下块（允许单轮连续输出多个块以并行调用；块内必须直接是纯 JSON 对象，顶层键严格为 \"name\" 和 \"arguments\"，禁止使用 <tool_name>/<arguments> 子标签，也禁止把参数平铺到顶层）：\n"
+            << "<dimension_tool_call>\n"
+            << "{\"name\": \"工具名\", \"arguments\": { ... }}\n"
+            << "</dimension_tool_call>\n"
+            << "如果本轮只需直接回复用户而不调用任何工具，则直接输出自然回复正文即可，不要输出该标签。\n\n";
+        for (const auto& t : tools) {
+            out << "- 工具名: " << t.name << "\n";
+            if (!t.description.empty()) out << "  说明: " << t.description << "\n";
+            if (!t.parameters.is_null()) {
+                std::string schema_str = t.parameters.dump();
+                if (schema_str.size() > 2400U) schema_str.resize(2400U);
+                out << "  参数 Schema: " << schema_str << "\n";
+            }
+        }
+        out << "\n";
+    } else {
+        out << "=== 输出要求 ===\n本轮无工具调用，请直接输出最终回复正文。\n\n";
+    }
+
+    // Dynamically project recent history using engine-aware budget (tightens when archived summary is present
+    // so mid-conversation reception CLI switches stay responsive while always preserving the latest turn).
+    const bool has_summary_in_sys =
+        (sys_combined.find("已提交的历史摘要") != std::string::npos) ||
+        (sys_combined.find("历史摘要") != std::string::npos) ||
+        (sys_combined.find("compaction") != std::string::npos);
+    const std::size_t kHistoryBudget =
+        recommended_reception_history_budget(engine_id, context_feature, has_summary_in_sys);
+    std::vector<std::string> selected_rev;
+    std::size_t used = 0;
+    for (auto it = turn_blocks.rbegin(); it != turn_blocks.rend(); ++it) {
+        if (!selected_rev.empty() && used + it->size() > kHistoryBudget) break;
+        used += it->size();
+        selected_rev.push_back(*it);
+    }
+    out << "=== 对话与执行回执记录 ===\n";
+    for (auto it = selected_rev.rbegin(); it != selected_rev.rend(); ++it) {
+        out << *it << "\n\n";
+    }
+    out << "=== 请开始本轮回复 ===\n";
+    return out.str();
+}
+
+std::string build_cli_reception_delta_prompt(const std::vector<ModelMessage>& new_messages) {
+    std::ostringstream out;
+    for (const auto& msg : new_messages) {
+        if (msg.role == "system") continue;
+        out << format_reception_message_block(msg) << "\n\n";
+    }
+    out << "=== 请继续本轮回复 ===\n";
+    return out.str();
+}
+
+std::string compute_cli_reception_system_fingerprint(const ModelConfig& config,
+                                                     const std::vector<ModelMessage>& messages,
+                                                     const std::vector<ModelTool>& tools) {
+    std::ostringstream sig;
+    sig << "eng=" << config.cli_engine_id
+        << "|prov=" << config.cli_native_provider
+        << "|model=" << config.cli_native_model
+        << "|feat=" << config.context_feature
+        << "|think=" << (config.thinking_enabled.has_value() ? (*config.thinking_enabled ? "1" : "0") : "default")
+        << "|eff=" << config.reasoning_effort << "\n";
+
+    // Only include the primary system message (normalized for volatile time/char count).
+    // Secondary system messages (per-turn memory recalls / runtime hints) are streamed as delta updates.
+    for (const auto& msg : messages) {
+        if (msg.role == "system" && !msg.content.empty()) {
+            sig << "SYS0:" << normalize_primary_system_for_fingerprint(msg.content) << "\n";
+            break;
+        }
+    }
+    for (const auto& t : tools) {
+        sig << "TOOL:" << t.name << "|" << t.description << "|";
+        if (!t.parameters.is_null()) {
+            std::string schema_str = t.parameters.dump();
+            if (schema_str.size() > 900U) schema_str.resize(900U);
+            sig << schema_str;
+        }
+        sig << "\n";
+    }
+    return hash128_hex(sig.str());
+}
+
+ModelReply parse_cli_reception_reply(std::string_view raw_text,
+                                     const std::vector<ModelTool>& allowed_tools) {
+    ModelReply reply;
+    std::string src(raw_text);
+    if (allowed_tools.empty()) {
+        reply.text = trim_copy(src);
+        return reply;
+    }
+
+    std::set<std::string> allowed_names;
+    for (const auto& t : allowed_tools) allowed_names.insert(t.name);
+
+    static constexpr std::string_view kOpenTag = "<dimension_tool_call>";
+    static constexpr std::string_view kCloseTag = "</dimension_tool_call>";
+
+    std::string cleaned_text;
+    cleaned_text.reserve(src.size());
+    std::size_t cursor = 0;
+    int call_seq = 0;
+
+    while (cursor < src.size()) {
+        const std::size_t open_pos = src.find(kOpenTag, cursor);
+        if (open_pos == std::string::npos) {
+            cleaned_text.append(src, cursor, src.size() - cursor);
+            break;
+        }
+        const std::size_t body_start = open_pos + kOpenTag.size();
+        const std::size_t close_pos = src.find(kCloseTag, body_start);
+        if (close_pos == std::string::npos) {
+            cleaned_text.append(src, cursor, src.size() - cursor);
+            break;
+        }
+        cleaned_text.append(src, cursor, open_pos - cursor);
+        std::string payload = trim_copy(std::string_view(src).substr(body_start, close_pos - body_start));
+        // Strip optional ```json ... ``` markdown fence inside tag
+        if (payload.starts_with("```")) {
+            const auto first_nl = payload.find('\n');
+            if (first_nl != std::string::npos) payload.erase(0, first_nl + 1);
+            if (payload.ends_with("```")) payload.resize(payload.size() - 3);
+            payload = trim_copy(payload);
+        }
+
+        bool parsed_ok = false;
+        bool was_tool_envelope = false;
+        auto try_extract_xml_tag = [](std::string_view text, std::string_view tag) -> std::optional<std::string> {
+            const std::string open = "<" + std::string(tag) + ">";
+            const std::string close = "</" + std::string(tag) + ">";
+            const auto p1 = text.find(open);
+            if (p1 == std::string_view::npos) return std::nullopt;
+            const auto vstart = p1 + open.size();
+            const auto p2 = text.find(close, vstart);
+            if (p2 == std::string_view::npos) return std::nullopt;
+            return trim_copy(text.substr(vstart, p2 - vstart));
+        };
+        auto normalize_tool_args = [](const std::string& tname, Json::Object obj) -> std::string {
+            if (tname == "dispatch_native_cli") {
+                if (!obj.contains("task")) {
+                    if (auto it = obj.find("instruction"); it != obj.end() && it->second.is_string()) {
+                        obj["task"] = it->second;
+                    } else if (auto it2 = obj.find("prompt"); it2 != obj.end() && it2->second.is_string()) {
+                        obj["task"] = it2->second;
+                    }
+                }
+                if (!obj.contains("engine")) {
+                    if (auto it = obj.find("cli"); it != obj.end() && it->second.is_string()) {
+                        obj["engine"] = it->second;
+                    }
+                }
+            }
+            return Json(std::move(obj)).dump();
+        };
+        try {
+            const Json doc = Json::parse(payload);
+            if (doc.is_object()) {
+                std::string tname = jstr(doc, "name");
+                if (tname.empty()) tname = jstr(doc, "tool_name");
+                if (tname.empty()) tname = jstr(doc, "tool");
+                if (!tname.empty()) {
+                    was_tool_envelope = true;
+                }
+                if (!tname.empty() && allowed_names.contains(tname)) {
+                    std::string args_str = "{}";
+                    const auto* av = doc.find("arguments");
+                    if (!av) av = doc.find("args");
+                    if (!av) av = doc.find("params");
+                    if (!av) av = doc.find("parameters");
+                    if (av) {
+                        if (av->is_object()) {
+                            args_str = normalize_tool_args(tname, av->as_object());
+                        } else if (av->is_string()) {
+                            const auto sub = Json::parse(av->as_string());
+                            if (sub.is_object()) args_str = normalize_tool_args(tname, sub.as_object());
+                        }
+                    } else {
+                        // Model flattened arguments onto top-level JSON alongside "tool"/"name".
+                        Json::Object flat;
+                        for (const auto& [k, v] : doc.as_object()) {
+                            if (k == "name" || k == "tool_name" || k == "tool") continue;
+                            flat[k] = v;
+                        }
+                        if (!flat.empty()) {
+                            args_str = normalize_tool_args(tname, std::move(flat));
+                        }
+                    }
+                    ToolCall tc;
+                    tc.id = "cli_tc_" + std::to_string(++call_seq);
+                    tc.name = tname;
+                    tc.arguments = std::move(args_str);
+                    reply.tool_calls.push_back(std::move(tc));
+                    parsed_ok = true;
+                }
+            }
+        } catch (...) {}
+
+        // Fallback tolerance for models that emit nested <tool_name>...</tool_name><arguments>{...}</arguments>.
+        if (!parsed_ok) {
+            auto xml_name = try_extract_xml_tag(payload, "tool_name");
+            if (!xml_name) xml_name = try_extract_xml_tag(payload, "name");
+            if (xml_name && !xml_name->empty()) {
+                was_tool_envelope = true;
+                if (allowed_names.contains(*xml_name)) {
+                    std::string args_str = "{}";
+                    auto xml_args = try_extract_xml_tag(payload, "arguments");
+                    if (!xml_args) xml_args = try_extract_xml_tag(payload, "args");
+                    if (xml_args && !xml_args->empty()) {
+                        std::string a = *xml_args;
+                        if (a.starts_with("```")) {
+                            const auto nl = a.find('\n');
+                            if (nl != std::string::npos) a.erase(0, nl + 1);
+                            if (a.ends_with("```")) a.resize(a.size() - 3);
+                            a = trim_copy(a);
+                        }
+                        try {
+                            const auto parsed_args = Json::parse(a);
+                            if (parsed_args.is_object()) args_str = parsed_args.dump();
+                        } catch (...) {}
+                    }
+                    ToolCall tc;
+                    tc.id = "cli_tc_" + std::to_string(++call_seq);
+                    tc.name = *xml_name;
+                    tc.arguments = std::move(args_str);
+                    reply.tool_calls.push_back(std::move(tc));
+                    parsed_ok = true;
+                }
+            }
+        }
+
+        if (!parsed_ok && !was_tool_envelope) {
+            // Preserve unparsed text only if it did not look like a tool call envelope
+            cleaned_text.append(src, open_pos, (close_pos + kCloseTag.size()) - open_pos);
+        }
+        cursor = close_pos + kCloseTag.size();
+    }
+
+    reply.text = trim_copy(cleaned_text);
+    return reply;
+}
+
+namespace {
+
+std::string canonical_reception_msg_key(const ModelMessage& msg) {
+    std::ostringstream oss;
+    oss << msg.role << '\x1f' << msg.tool_call_id << '\x1f' << msg.content << '\x1f' << msg.images.size();
+    for (const auto& tc : msg.tool_calls) {
+        oss << '\x1e' << tc.name << '\x1f' << tc.arguments;
+    }
+    return hash128_hex(oss.str());
+}
+
+struct ReceptionTurnInputs {
+    std::string primary_time_anchor;
+    std::string dynamic_sys_blob;
+    std::vector<ModelMessage> non_sys_msgs;
+    std::vector<std::string> non_sys_keys;
+};
+
+ReceptionTurnInputs extract_reception_turn_inputs(const std::vector<ModelMessage>& messages) {
+    ReceptionTurnInputs out;
+    bool seen_primary_sys = false;
+    for (const auto& m : messages) {
+        if (m.role == "system") {
+            if (m.content.empty()) continue;
+            if (!seen_primary_sys) {
+                seen_primary_sys = true;
+                out.primary_time_anchor = extract_time_anchor_from_system(m.content);
+            } else {
+                if (!out.dynamic_sys_blob.empty()) out.dynamic_sys_blob += "\n\n";
+                out.dynamic_sys_blob += m.content;
+            }
+            continue;
+        }
+        out.non_sys_msgs.push_back(m);
+        out.non_sys_keys.push_back(canonical_reception_msg_key(m));
+    }
+    if (out.dynamic_sys_blob.size() > 16000U) {
+        out.dynamic_sys_blob = out.dynamic_sys_blob.substr(0, 16000U) + "\n…（动态上下文已截断）";
+    }
+    return out;
+}
+
+struct CachedReceptionSessionState {
+    std::string session_id;
+    std::string fingerprint;
+    std::vector<std::string> sent_keys;
+    std::string last_assistant_text;
+    std::size_t last_assistant_tool_count = 0;
+    std::string last_time_anchor;
+    std::string last_dynamic_sys_blob;
+    std::chrono::steady_clock::time_point last_used = std::chrono::steady_clock::now();
+};
+
+std::optional<std::string> try_build_incremental_delta_prompt(const CachedReceptionSessionState& st,
+                                                              const ReceptionTurnInputs& cur,
+                                                              const std::string& fingerprint) {
+    if (st.fingerprint != fingerprint || st.sent_keys.empty()) return std::nullopt;
+    if (cur.non_sys_keys.size() <= st.sent_keys.size()) return std::nullopt;
+    for (std::size_t i = 0; i < st.sent_keys.size(); ++i) {
+        if (cur.non_sys_keys[i] != st.sent_keys[i]) return std::nullopt;
+    }
+
+    std::size_t delta_start = st.sent_keys.size();
+    // Skip the assistant reply emitted by this exact persistent session in the previous turn.
+    if (delta_start < cur.non_sys_msgs.size() && cur.non_sys_msgs[delta_start].role == "assistant") {
+        const auto& am = cur.non_sys_msgs[delta_start];
+        if (trim_copy(am.content) == st.last_assistant_text &&
+            am.tool_calls.size() == st.last_assistant_tool_count) {
+            ++delta_start;
+        }
+    }
+    if (delta_start >= cur.non_sys_msgs.size()) return std::nullopt;
+
+    std::ostringstream out;
+    if (!cur.primary_time_anchor.empty() && cur.primary_time_anchor != st.last_time_anchor) {
+        out << "[当前本地时间：" << cur.primary_time_anchor << "]\n\n";
+    }
+    if (!cur.dynamic_sys_blob.empty() && cur.dynamic_sys_blob != st.last_dynamic_sys_blob) {
+        out << "### [DYNAMIC CONTEXT UPDATE]\n" << cur.dynamic_sys_blob << "\n\n";
+    }
+    std::vector<ModelMessage> delta_msgs(cur.non_sys_msgs.begin() + static_cast<std::ptrdiff_t>(delta_start),
+                                         cur.non_sys_msgs.end());
+    out << build_cli_reception_delta_prompt(delta_msgs);
+    return out.str();
+}
+
+struct ResolvedReceptionRuntime {
+    std::string engine_id;
+    std::string engine_name;
+    std::string platform; // "windows" | "wsl"
+    std::string binary_path;
+    fs::path wsl_exe;
+    std::string sandbox_distribution;
+    fs::path sandbox_ws;
+    std::string runtime_key;
+};
+
+std::wstring build_persistent_command_line(const ResolvedReceptionRuntime& rt,
+                                           const std::vector<std::string>& cli_args,
+                                           std::wstring& out_cwd_w,
+                                           std::wstring& out_env_block,
+                                           bool& out_use_env) {
+    if (rt.platform == "wsl") {
+        const fs::path wsl_exe = resolve_wsl_exe_path(rt.wsl_exe);
+        if (wsl_exe.empty() || rt.sandbox_distribution.empty()) return {};
+        const std::string linux_ws = windows_path_to_wsl_path(rt.sandbox_ws, rt.sandbox_distribution);
+        const std::string linux_home = "/var/lib/dimension-cli-homes/" + rt.engine_id;
+        std::vector<std::string> bw{
+            "/usr/bin/bwrap",
+            "--unshare-all",
+            "--share-net",
+            "--die-with-parent",
+            "--new-session",
+            "--cap-drop", "ALL",
+            "--ro-bind", "/usr", "/usr",
+            "--symlink", "usr/bin", "/bin",
+            "--symlink", "usr/sbin", "/sbin",
+            "--symlink", "usr/lib", "/lib",
+            "--symlink", "usr/lib64", "/lib64",
+            "--ro-bind-try", "/etc/passwd", "/etc/passwd",
+            "--ro-bind-try", "/etc/group", "/etc/group",
+            "--ro-bind-try", "/etc/hosts", "/etc/hosts",
+            "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+            "--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
+            "--ro-bind-try", "/etc/ssl", "/etc/ssl",
+            "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
+            "--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
+            "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+            "--ro-bind-try", "/etc/localtime", "/etc/localtime",
+            "--ro-bind", "/opt/dimension-tools", "/opt/dimension-tools",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--tmpfs", "/run",
+            "--ro-bind", linux_ws, "/workspace",
+            "--dir", "/home/dimension",
+            "--bind", linux_home, "/home/dimension",
+            "--uid", "1001",
+            "--gid", "1002",
+            "--clearenv",
+            "--setenv", "PATH", "/opt/dimension-tools/bin:/usr/local/bin:/usr/bin:/bin",
+            "--setenv", "HOME", "/home/dimension",
+            "--setenv", "USER", "dimension",
+            "--setenv", "LOGNAME", "dimension",
+            "--setenv", "LANG", "C.UTF-8",
+            "--setenv", "LC_ALL", "C.UTF-8",
+            "--setenv", "TERM", "dumb",
+            "--setenv", "TMPDIR", "/tmp",
+            "--setenv", "PYTHONUTF8", "1",
+            "--setenv", "PYTHONIOENCODING", "utf-8"
+        };
+        for (const auto& [pk, pv] : build_sandbox_proxy_env_overrides()) {
+            bw.push_back("--setenv");
+            bw.push_back(pk);
+            bw.push_back(pv);
+        }
+        bw.push_back("--chdir");
+        bw.push_back("/workspace");
+        bw.push_back("--");
+        bw.push_back(rt.binary_path);
+        for (const auto& a : cli_args) bw.push_back(a);
+
+        const std::string prep = "mkdir -p -m 700 \"$1\" && chown 1001:1002 \"$1\" && shift && exec \"$@\"";
+        std::wstring cmd = quote_win_arg(wsl_exe.wstring())
+            + L" -d " + quote_win_arg(utf8_to_wide(rt.sandbox_distribution))
+            + L" -u root --exec /bin/sh -c " + quote_win_arg(utf8_to_wide(prep)) + L" _ "
+            + quote_win_arg(utf8_to_wide(linux_home));
+        for (const auto& ba : bw) {
+            cmd.push_back(L' ');
+            cmd += quote_win_arg(utf8_to_wide(ba));
+        }
+        out_cwd_w = rt.sandbox_ws.wstring();
+        out_use_env = false;
+        return cmd;
+    }
+
+    const std::string low_bin = ascii_lower(rt.binary_path);
+    const bool is_cmd_script = low_bin.ends_with(".cmd") || low_bin.ends_with(".bat");
+    std::wstring inner = quote_win_arg(utf8_to_wide(rt.binary_path));
+    for (const auto& a : cli_args) {
+        inner.push_back(L' ');
+        inner += quote_win_arg(utf8_to_wide(a));
+    }
+    out_cwd_w = rt.sandbox_ws.wstring();
+    std::vector<std::pair<std::string, std::string>> p_env = build_host_proxy_env_overrides();
+    p_env.emplace_back("PYTHONUTF8", "1");
+    p_env.emplace_back("PYTHONIOENCODING", "utf-8");
+    out_env_block = build_environment_block(p_env);
+    out_use_env = true;
+    return is_cmd_script ? (L"cmd.exe /d /s /c \"" + inner + L"\"") : inner;
+}
+
+class PersistentChildProcess {
+public:
+    PersistentChildProcess() = default;
+    ~PersistentChildProcess() {
+        kill_process();
+        cancel_and_join_stderr();
+    }
+    PersistentChildProcess(const PersistentChildProcess&) = delete;
+    PersistentChildProcess& operator=(const PersistentChildProcess&) = delete;
+
+    bool spawn(const std::wstring& cmd_line,
+               const std::wstring& cwd_w,
+               const std::wstring& env_block,
+               bool use_env_block) {
+        if (cmd_line.empty()) return false;
+
+        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE out_r = nullptr, out_w = nullptr, err_r = nullptr, err_w = nullptr, in_r = nullptr, in_w = nullptr;
+        if (!CreatePipe(&out_r, &out_w, &sa, 0)) return false;
+        HandleGuard out_read(out_r), out_write(out_w);
+        SetHandleInformation(out_read.h, HANDLE_FLAG_INHERIT, 0);
+
+        if (!CreatePipe(&err_r, &err_w, &sa, 0)) return false;
+        HandleGuard err_read(err_r), err_write(err_w);
+        SetHandleInformation(err_read.h, HANDLE_FLAG_INHERIT, 0);
+
+        if (!CreatePipe(&in_r, &in_w, &sa, 0)) return false;
+        HandleGuard in_read(in_r), in_write(in_w);
+        SetHandleInformation(in_write.h, HANDLE_FLAG_INHERIT, 0);
+
+        HandleGuard job(CreateJobObjectW(nullptr, nullptr));
+        if (job.h) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+            jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            SetInformationJobObject(job.h, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+        }
+
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        si.hStdInput = in_read.h;
+        si.hStdOutput = out_write.h;
+        si.hStdError = err_write.h;
+
+        std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
+        mutable_cmd.push_back(L'\0');
+        DWORD create_flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
+        LPVOID env_ptr = nullptr;
+        std::wstring env_copy = env_block;
+        if (use_env_block && !env_copy.empty()) {
+            env_ptr = env_copy.data();
+            create_flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
+
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
+                            create_flags, env_ptr, cwd_w.empty() ? nullptr : cwd_w.c_str(), &si, &pi)) {
+            return false;
+        }
+
+        proc_h_ = HandleGuard(pi.hProcess);
+        HandleGuard thread_h(pi.hThread);
+        job_ = std::move(job);
+        if (job_.h) AssignProcessToJobObject(job_.h, proc_h_.h);
+        ResumeThread(thread_h.h);
+
+        out_read_ = std::move(out_read);
+        err_read_ = std::move(err_read);
+        {
+            std::lock_guard lk(write_mu_);
+            in_write_ = std::move(in_write);
+        }
+
+        stderr_drainer_ = std::jthread([this]() {
+            char buf[2048];
+            DWORD n = 0;
+            while (err_read_.h && ReadFile(err_read_.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+                std::lock_guard lk(err_mu_);
+                if (stderr_tail_.size() > 8192U) {
+                    stderr_tail_.erase(0, stderr_tail_.size() - 4096U);
+                }
+                stderr_tail_.append(buf, n);
+            }
+        });
+        return true;
+    }
+
+    HANDLE stdout_handle() const { return out_read_.h; }
+
+    bool is_running() const {
+        return proc_h_.h && WaitForSingleObject(proc_h_.h, 0) == WAIT_TIMEOUT;
+    }
+
+    bool write_line(std::string_view line) {
+        std::string buf;
+        buf.reserve(line.size() + 1U);
+        buf.append(line);
+        buf.push_back('\n');
+        std::lock_guard lk(write_mu_);
+        if (!in_write_.h) return false;
+        const char* p = buf.data();
+        std::size_t rem = buf.size();
+        while (rem > 0) {
+            const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(rem, 32768U));
+            DWORD written = 0;
+            if (!WriteFile(in_write_.h, p, chunk, &written, nullptr) || written == 0) {
+                return false;
+            }
+            p += written;
+            rem -= written;
+        }
+        return true;
+    }
+
+    void close_stdin() {
+        std::lock_guard lk(write_mu_);
+        in_write_ = HandleGuard{};
+    }
+
+    void kill_process() {
+        close_stdin();
+        if (job_.h) {
+            TerminateJobObject(job_.h, 0);
+        } else if (proc_h_.h) {
+            TerminateProcess(proc_h_.h, 0);
+        }
+        if (proc_h_.h) {
+            WaitForSingleObject(proc_h_.h, 500);
+        }
+    }
+
+    void cancel_and_join_stderr() {
+        if (stderr_drainer_.joinable()) {
+            CancelSynchronousIo(static_cast<HANDLE>(stderr_drainer_.native_handle()));
+            stderr_drainer_.join();
+        }
+    }
+
+    std::string stderr_summary() const {
+        std::lock_guard lk(err_mu_);
+        return trim_copy(ensure_valid_utf8(stderr_tail_));
+    }
+
+private:
+    HandleGuard job_;
+    HandleGuard proc_h_;
+    std::mutex write_mu_;
+    HandleGuard in_write_;
+    HandleGuard out_read_;
+    HandleGuard err_read_;
+    mutable std::mutex err_mu_;
+    std::string stderr_tail_;
+    std::jthread stderr_drainer_;
+};
+
+struct PoolCallOutcome {
+    bool handled = false;
+    bool cancelled = false;
+    bool streamed_any_text = false;
+    bool timed_out = false;
+    std::string error_detail;
+    ModelReply reply;
+};
+
+class KimiAcpWorker {
+public:
+    explicit KimiAcpWorker(ResolvedReceptionRuntime rt)
+        : rt_(std::move(rt)), last_used_(std::chrono::steady_clock::now()) {}
+
+    ~KimiAcpWorker() { stop(); }
+
+    const std::string& runtime_key() const { return rt_.runtime_key; }
+    bool is_alive() const { return alive_.load(std::memory_order_acquire) && proc_.is_running(); }
+    std::chrono::steady_clock::time_point last_used() const {
+        std::lock_guard lk(sess_mu_);
+        return last_used_;
+    }
+
+    bool has_matching_session(const std::string& fingerprint,
+                              const ReceptionTurnInputs& inputs) const {
+        std::lock_guard lk(sess_mu_);
+        for (const auto& s : sessions_) {
+            if (try_build_incremental_delta_prompt(s, inputs, fingerprint).has_value()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool start() {
+        std::wstring cwd_w, env_block;
+        bool use_env = false;
+        const std::wstring cmd = build_persistent_command_line(rt_, {"acp"}, cwd_w, env_block, use_env);
+        if (cmd.empty() || !proc_.spawn(cmd, cwd_w, env_block, use_env)) {
+            return false;
+        }
+        alive_.store(true, std::memory_order_release);
+        stdout_reader_ = std::jthread([this]() { reader_loop(); });
+
+        const Json init_params = O{
+            {"protocolVersion", 1.0},
+            {"clientCapabilities", O{
+                {"fs", O{{"readTextFile", false}, {"writeTextFile", false}}}
+            }}
+        };
+        auto init_resp = send_rpc("initialize", init_params, 20000, {});
+        if (!init_resp || init_resp->find("error")) {
+            stop();
+            return false;
+        }
+        touch();
+        return true;
+    }
+
+    void stop() {
+        alive_.store(false, std::memory_order_release);
+        rpc_cv_.notify_all();
+        proc_.kill_process();
+        if (stdout_reader_.joinable()) {
+            CancelSynchronousIo(static_cast<HANDLE>(stdout_reader_.native_handle()));
+            stdout_reader_.join();
+        }
+        proc_.cancel_and_join_stderr();
+    }
+
+    PoolCallOutcome run_turn(const ModelConfig& config,
+                             const std::vector<ModelMessage>& messages,
+                             const std::vector<ModelTool>& tools,
+                             const std::string& fingerprint,
+                             const ReceptionTurnInputs& inputs,
+                             ModelChunk chunk,
+                             std::stop_token stop_tok,
+                             int timeout_seconds) {
+        PoolCallOutcome out;
+        if (!is_alive()) return out;
+
+        std::string sid;
+        std::string prompt_payload;
+        bool reused_session = false;
+        {
+            std::lock_guard lk(sess_mu_);
+            for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+                if (auto delta = try_build_incremental_delta_prompt(*it, inputs, fingerprint)) {
+                    sid = it->session_id;
+                    prompt_payload = std::move(*delta);
+                    reused_session = true;
+                    break;
+                }
+            }
+        }
+
+        if (!reused_session) {
+            const std::string acp_cwd = (rt_.platform == "wsl")
+                ? std::string("/workspace")
+                : path_to_utf8(rt_.sandbox_ws);
+            auto ns_resp = send_rpc("session/new", O{{"cwd", acp_cwd}, {"mcpServers", A{}}}, 15000, stop_tok);
+            if (stop_tok.stop_requested()) {
+                out.handled = true;
+                out.cancelled = true;
+                return out;
+            }
+            if (!ns_resp || ns_resp->find("error")) {
+                stop();
+                return out;
+            }
+            if (const auto* r = ns_resp->find("result"); r && r->is_object()) {
+                sid = jstr(*r, "sessionId");
+            }
+            if (sid.empty()) {
+                stop();
+                return out;
+            }
+
+            // Configure explicit model first (so model switch cannot reset thinking), then set thinking and default mode.
+            // Note: Do NOT use Kimi ACP's built-in "plan" mode here because Kimi's plan mode injects its own
+            // "write .kimi/plans file + ExitPlanMode" agent loop; instead use "default" mode while our
+            // handle_jsonrpc_line auto-cancels any server permission request and the sandbox workspace is isolated.
+            if (!config.cli_native_model.empty()) {
+                (void)send_rpc("session/set_config_option", O{
+                    {"sessionId", sid}, {"configId", "model"}, {"value", config.cli_native_model}
+                }, 5000, stop_tok);
+            }
+            (void)send_rpc("session/set_config_option", O{
+                {"sessionId", sid}, {"configId", "mode"}, {"value", "default"}
+            }, 5000, stop_tok);
+            (void)send_rpc("session/set_config_option", O{
+                {"sessionId", sid}, {"configId", "thinking"}, {"value", config.thinking_enabled.value_or(true) ? "on" : "off"}
+            }, 5000, stop_tok);
+            if (stop_tok.stop_requested()) {
+                out.handled = true;
+                out.cancelled = true;
+                return out;
+            }
+            prompt_payload = build_cli_reception_prompt(messages, tools, config.context_feature, config.cli_engine_id);
+        }
+
+        ActiveTurn turn;
+        turn.session_id = sid;
+        turn.has_tools = !tools.empty();
+        turn.chunk = chunk;
+        {
+            std::lock_guard lk(active_mu_);
+            active_turn_ = &turn;
+        }
+        struct ActiveGuard {
+            KimiAcpWorker* self;
+            ~ActiveGuard() {
+                std::lock_guard lk(self->active_mu_);
+                self->active_turn_ = nullptr;
+            }
+        } active_guard{this};
+
+        bool cancelled = false;
+        bool timed_out = false;
+        const int rpc_id = next_rpc_id_.fetch_add(1, std::memory_order_relaxed);
+        const Json req_doc = O{
+            {"jsonrpc", "2.0"},
+            {"id", static_cast<double>(rpc_id)},
+            {"method", "session/prompt"},
+            {"params", O{
+                {"sessionId", sid},
+                {"prompt", A{O{{"type", "text"}, {"text", prompt_payload}}}}
+            }}
+        };
+        if (!proc_.write_line(req_doc.dump())) {
+            stop();
+            return out;
+        }
+
+        auto resp = wait_rpc_response(rpc_id, timeout_seconds * 1000, stop_tok, &cancelled, &timed_out);
+        if (cancelled) {
+            const Json cancel_note = O{
+                {"jsonrpc", "2.0"},
+                {"method", "session/cancel"},
+                {"params", O{{"sessionId", sid}}}
+            };
+            (void)proc_.write_line(cancel_note.dump());
+            erase_session(sid);
+            // Wait briefly for prompt RPC to unwind cleanly; if stuck, recycle worker.
+            bool c2 = false, t2 = false;
+            if (!wait_rpc_response(rpc_id, 1500, {}, &c2, &t2)) {
+                stop();
+            }
+            out.handled = true;
+            out.cancelled = true;
+            return out;
+        }
+        if (timed_out) {
+            const Json cancel_note = O{
+                {"jsonrpc", "2.0"},
+                {"method", "session/cancel"},
+                {"params", O{{"sessionId", sid}}}
+            };
+            (void)proc_.write_line(cancel_note.dump());
+            stop();
+            out.handled = true;
+            out.timed_out = true;
+            out.streamed_any_text = turn.streamed_any_text;
+            out.error_detail = "CLI 执行超过单轮时间上限（" + std::to_string(timeout_seconds) + "s）";
+            return out;
+        }
+        if (!resp || resp->find("error")) {
+            erase_session(sid);
+            std::string err_msg;
+            if (resp) {
+                if (const auto* err = resp->find("error"); err && err->is_object()) {
+                    err_msg = jstr(*err, "message");
+                }
+            }
+            if (!is_alive()) stop();
+            if (turn.streamed_any_text) {
+                out.handled = true;
+                out.streamed_any_text = true;
+                out.error_detail = err_msg.empty() ? proc_.stderr_summary() : err_msg;
+            }
+            return out;
+        }
+
+        // Flush any buffered non-tag tail from ReceptionTextStreamFilter.
+        if (turn.has_tools && chunk) {
+            turn.filter.flush([&](std::string_view piece) {
+                if (!piece.empty()) {
+                    turn.streamed_any_text = true;
+                    try { chunk("text", piece); } catch (...) {}
+                }
+            });
+        }
+
+        ModelReply reply = parse_cli_reception_reply(turn.raw_text, tools);
+        reply.input_tokens = static_cast<int>(std::min<std::int64_t>(turn.input_tokens, 2000000000LL));
+        reply.output_tokens = static_cast<int>(std::min<std::int64_t>(turn.output_tokens, 2000000000LL));
+        if (const auto* res = resp->find("result"); res && res->is_object()) {
+            if (const auto* u = res->find("usage"); u && u->is_object()) {
+                const auto in_t = static_cast<std::int64_t>(jnum(*u, "inputTokens", jnum(*u, "input_tokens", 0)));
+                const auto out_t = static_cast<std::int64_t>(jnum(*u, "outputTokens", jnum(*u, "output_tokens", 0)));
+                if (in_t > reply.input_tokens) reply.input_tokens = static_cast<int>(std::min<std::int64_t>(in_t, 2000000000LL));
+                if (out_t > reply.output_tokens) reply.output_tokens = static_cast<int>(std::min<std::int64_t>(out_t, 2000000000LL));
+            }
+        }
+        if (chunk && !turn.streamed_any_text && !reply.text.empty()) {
+            try { chunk("text", reply.text); } catch (...) {}
+            turn.streamed_any_text = true;
+        }
+
+        // Persist updated session state for O(1) incremental reuse on the next turn.
+        {
+            std::lock_guard lk(sess_mu_);
+            last_used_ = std::chrono::steady_clock::now();
+            CachedReceptionSessionState st;
+            st.session_id = sid;
+            st.fingerprint = fingerprint;
+            st.sent_keys = inputs.non_sys_keys;
+            st.last_assistant_text = reply.text;
+            st.last_assistant_tool_count = reply.tool_calls.size();
+            st.last_time_anchor = inputs.primary_time_anchor;
+            st.last_dynamic_sys_blob = inputs.dynamic_sys_blob;
+            st.last_used = last_used_;
+            bool replaced = false;
+            for (auto& existing : sessions_) {
+                if (existing.session_id == sid) {
+                    existing = std::move(st);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                sessions_.push_back(std::move(st));
+                while (sessions_.size() > 8U) {
+                    sessions_.pop_front();
+                }
+            }
+        }
+
+        out.handled = true;
+        out.streamed_any_text = turn.streamed_any_text;
+        out.reply = std::move(reply);
+        return out;
+    }
+
+private:
+    struct ActiveTurn {
+        std::string session_id;
+        bool has_tools = false;
+        ModelChunk chunk;
+        ReceptionTextStreamFilter filter;
+        std::string raw_text;
+        bool streamed_any_text = false;
+        std::int64_t input_tokens = 0;
+        std::int64_t output_tokens = 0;
+    };
+
+    void touch() {
+        std::lock_guard lk(sess_mu_);
+        last_used_ = std::chrono::steady_clock::now();
+    }
+
+    void erase_session(const std::string& sid) {
+        std::lock_guard lk(sess_mu_);
+        for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+            if (it->session_id == sid) {
+                sessions_.erase(it);
+                break;
+            }
+        }
+    }
+
+    std::optional<Json> send_rpc(const std::string& method,
+                                 const Json& params,
+                                 int timeout_ms,
+                                 std::stop_token stop_tok) {
+        const int id = next_rpc_id_.fetch_add(1, std::memory_order_relaxed);
+        const Json req = O{
+            {"jsonrpc", "2.0"},
+            {"id", static_cast<double>(id)},
+            {"method", method},
+            {"params", params}
+        };
+        if (!proc_.write_line(req.dump())) {
+            alive_.store(false, std::memory_order_release);
+            return std::nullopt;
+        }
+        bool cancelled = false, timed_out = false;
+        return wait_rpc_response(id, timeout_ms, stop_tok, &cancelled, &timed_out);
+    }
+
+    std::optional<Json> wait_rpc_response(int id,
+                                          int timeout_ms,
+                                          std::stop_token stop_tok,
+                                          bool* out_cancelled,
+                                          bool* out_timed_out) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        std::unique_lock lk(rpc_mu_);
+        while (true) {
+            if (auto it = rpc_responses_.find(id); it != rpc_responses_.end()) {
+                Json val = std::move(it->second);
+                rpc_responses_.erase(it);
+                return val;
+            }
+            if (stop_tok.stop_requested()) {
+                if (out_cancelled) *out_cancelled = true;
+                return std::nullopt;
+            }
+            if (!alive_.load(std::memory_order_acquire)) {
+                return std::nullopt;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                if (out_timed_out) *out_timed_out = true;
+                return std::nullopt;
+            }
+            const auto step = std::min(deadline - now,
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(50)));
+            rpc_cv_.wait_for(lk, step);
+        }
+    }
+
+    void reader_loop() {
+        std::string pending;
+        char buf[4096];
+        DWORD n = 0;
+        HANDLE h = proc_.stdout_handle();
+        while (h && ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            pending.append(buf, n);
+            std::size_t nl = 0;
+            while ((nl = pending.find('\n')) != std::string::npos) {
+                std::string line = pending.substr(0, nl);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                pending.erase(0, nl + 1);
+                handle_jsonrpc_line(line);
+            }
+        }
+        if (!pending.empty()) handle_jsonrpc_line(pending);
+        alive_.store(false, std::memory_order_release);
+        rpc_cv_.notify_all();
+    }
+
+    void handle_jsonrpc_line(std::string_view raw_line) {
+        const std::string line = trim_copy(ensure_valid_utf8(raw_line));
+        if (line.empty() || line.front() != '{') return;
+        Json doc;
+        try {
+            doc = Json::parse(line);
+        } catch (...) {
+            return;
+        }
+        if (!doc.is_object()) return;
+
+        const auto* id_val = doc.find("id");
+        const std::string method = jstr(doc, "method");
+
+        // Auto-cancel any unexpected server-initiated request (e.g. permission prompt) to prevent deadlocks.
+        if (id_val && !method.empty()) {
+            const Json reject = O{
+                {"jsonrpc", "2.0"},
+                {"id", *id_val},
+                {"result", O{{"outcome", O{{"outcome", "cancelled"}}}}}
+            };
+            (void)proc_.write_line(reject.dump());
+            return;
+        }
+
+        // Standard JSON-RPC response to one of our requests.
+        if (id_val && id_val->is_number()) {
+            const int rid = static_cast<int>(id_val->as_number());
+            {
+                std::lock_guard lk(rpc_mu_);
+                rpc_responses_[rid] = std::move(doc);
+            }
+            rpc_cv_.notify_all();
+            return;
+        }
+
+        // Streaming session/update notification.
+        if (method == "session/update") {
+            const auto* params = doc.find("params");
+            if (!params || !params->is_object()) return;
+            const std::string sid = jstr(*params, "sessionId");
+            const auto* upd = params->find("update");
+            if (!upd || !upd->is_object()) return;
+            const std::string kind = jstr(*upd, "sessionUpdate");
+
+            std::lock_guard lk(active_mu_);
+            if (!active_turn_ || (!sid.empty() && sid != active_turn_->session_id)) return;
+
+            if (kind == "agent_thought_chunk") {
+                if (const auto* content = upd->find("content"); content && content->is_object()) {
+                    const std::string text = jstr(*content, "text");
+                    if (!text.empty() && active_turn_->chunk) {
+                        try { active_turn_->chunk("thinking", text); } catch (...) {}
+                    }
+                }
+            } else if (kind == "agent_message_chunk") {
+                if (const auto* content = upd->find("content"); content && content->is_object()) {
+                    const std::string text = jstr(*content, "text");
+                    if (!text.empty()) {
+                        active_turn_->raw_text += text;
+                        if (active_turn_->chunk) {
+                            if (active_turn_->has_tools) {
+                                active_turn_->filter.feed(text, [&](std::string_view piece) {
+                                    if (!piece.empty()) {
+                                        active_turn_->streamed_any_text = true;
+                                        try { active_turn_->chunk("text", piece); } catch (...) {}
+                                    }
+                                });
+                            } else {
+                                active_turn_->streamed_any_text = true;
+                                try { active_turn_->chunk("text", text); } catch (...) {}
+                            }
+                        }
+                    }
+                }
+            } else if (kind == "usage_update") {
+                const auto used = static_cast<std::int64_t>(jnum(*upd, "used", 0));
+                if (used > active_turn_->input_tokens) active_turn_->input_tokens = used;
+            }
+        }
+    }
+
+    ResolvedReceptionRuntime rt_;
+    PersistentChildProcess proc_;
+    std::atomic<bool> alive_{false};
+    std::atomic<int> next_rpc_id_{1};
+    std::jthread stdout_reader_;
+
+    std::mutex rpc_mu_;
+    std::condition_variable rpc_cv_;
+    std::map<int, Json> rpc_responses_;
+
+    std::mutex active_mu_;
+    ActiveTurn* active_turn_ = nullptr;
+
+    mutable std::mutex sess_mu_;
+    std::deque<CachedReceptionSessionState> sessions_;
+    std::chrono::steady_clock::time_point last_used_;
+};
+
+class AgyStreamWorker {
+public:
+    AgyStreamWorker(ResolvedReceptionRuntime rt, std::string fingerprint,
+                    std::string native_model, std::string reasoning_effort)
+        : rt_(std::move(rt)),
+          fingerprint_(std::move(fingerprint)),
+          native_model_(std::move(native_model)),
+          reasoning_effort_(std::move(reasoning_effort)) {
+        state_.fingerprint = fingerprint_;
+        state_.last_used = std::chrono::steady_clock::now();
+    }
+
+    ~AgyStreamWorker() { stop(); }
+
+    const std::string& runtime_key() const { return rt_.runtime_key; }
+    const std::string& fingerprint() const { return fingerprint_; }
+    bool is_alive() const { return alive_.load(std::memory_order_acquire) && proc_.is_running(); }
+    std::chrono::steady_clock::time_point last_used() const { return state_.last_used; }
+
+    bool can_reuse_for(const std::string& fp, const ReceptionTurnInputs& inputs) const {
+        return is_alive() && try_build_incremental_delta_prompt(state_, inputs, fp).has_value();
+    }
+
+    bool start() {
+        std::vector<std::string> args{
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--mode", "plan",
+            "--disable-slash-commands"
+        };
+        if (!native_model_.empty()) {
+            args.push_back("--model");
+            args.push_back(native_model_);
+        }
+        if (reasoning_effort_ == "low" || reasoning_effort_ == "medium" ||
+            reasoning_effort_ == "high" || reasoning_effort_ == "xhigh" || reasoning_effort_ == "max") {
+            args.push_back("--effort");
+            args.push_back(reasoning_effort_);
+        }
+        std::wstring cwd_w, env_block;
+        bool use_env = false;
+        const std::wstring cmd = build_persistent_command_line(rt_, args, cwd_w, env_block, use_env);
+        if (cmd.empty() || !proc_.spawn(cmd, cwd_w, env_block, use_env)) {
+            return false;
+        }
+        alive_.store(true, std::memory_order_release);
+        stdout_reader_ = std::jthread([this]() { reader_loop(); });
+        return true;
+    }
+
+    void stop() {
+        alive_.store(false, std::memory_order_release);
+        turn_cv_.notify_all();
+        proc_.kill_process();
+        if (stdout_reader_.joinable()) {
+            CancelSynchronousIo(static_cast<HANDLE>(stdout_reader_.native_handle()));
+            stdout_reader_.join();
+        }
+        proc_.cancel_and_join_stderr();
+    }
+
+    PoolCallOutcome run_turn(const ModelConfig& config,
+                             const std::vector<ModelMessage>& messages,
+                             const std::vector<ModelTool>& tools,
+                             const ReceptionTurnInputs& inputs,
+                             ModelChunk chunk,
+                             std::stop_token stop_tok,
+                             int timeout_seconds) {
+        PoolCallOutcome out;
+        if (!is_alive()) return out;
+
+        std::string payload;
+        if (auto delta = try_build_incremental_delta_prompt(state_, inputs, fingerprint_)) {
+            payload = std::move(*delta);
+        } else if (state_.sent_keys.empty()) {
+            payload = build_cli_reception_prompt(messages, tools, config.context_feature, config.cli_engine_id);
+        } else {
+            return out;
+        }
+
+        ActiveTurn turn;
+        turn.has_tools = !tools.empty();
+        turn.chunk = chunk;
+        {
+            std::lock_guard lk(turn_mu_);
+            active_turn_ = &turn;
+        }
+        struct ActiveGuard {
+            AgyStreamWorker* self;
+            ~ActiveGuard() {
+                std::lock_guard lk(self->turn_mu_);
+                self->active_turn_ = nullptr;
+            }
+        } active_guard{this};
+
+        const Json user_ev = O{
+            {"event", "user"},
+            {"message", O{{"content", payload}}}
+        };
+        if (!proc_.write_line(user_ev.dump())) {
+            stop();
+            return out;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_seconds);
+        bool cancelled = false;
+        bool timed_out = false;
+        {
+            std::unique_lock lk(turn_mu_);
+            while (!turn.finished) {
+                if (stop_tok.stop_requested()) {
+                    cancelled = true;
+                    break;
+                }
+                if (!alive_.load(std::memory_order_acquire)) {
+                    break;
+                }
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) {
+                    timed_out = true;
+                    break;
+                }
+                const auto step = std::min(deadline - now,
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::milliseconds(50)));
+                turn_cv_.wait_for(lk, step);
+            }
+        }
+
+        if (cancelled) {
+            stop();
+            out.handled = true;
+            out.cancelled = true;
+            return out;
+        }
+        if (timed_out) {
+            stop();
+            out.handled = true;
+            out.timed_out = true;
+            out.streamed_any_text = turn.streamed_any_text;
+            out.error_detail = "CLI 执行超过单轮时间上限（" + std::to_string(timeout_seconds) + "s）";
+            return out;
+        }
+        if (!turn.finished || turn.is_error) {
+            stop();
+            if (turn.streamed_any_text) {
+                out.handled = true;
+                out.streamed_any_text = true;
+                out.error_detail = !turn.error_detail.empty() ? turn.error_detail : proc_.stderr_summary();
+            }
+            return out;
+        }
+
+        if (turn.has_tools && chunk) {
+            turn.filter.flush([&](std::string_view piece) {
+                if (!piece.empty()) {
+                    turn.streamed_any_text = true;
+                    try { chunk("text", piece); } catch (...) {}
+                }
+            });
+        }
+
+        const std::string& final_raw =
+            (!turn.result_response.empty() && turn.raw_text.empty())
+                ? turn.result_response
+                : ((!turn.result_response.empty() && turn.result_response.size() >= turn.raw_text.size())
+                    ? turn.result_response : turn.raw_text);
+        ModelReply reply = parse_cli_reception_reply(final_raw, tools);
+        reply.input_tokens = static_cast<int>(std::min<std::int64_t>(turn.input_tokens, 2000000000LL));
+        reply.output_tokens = static_cast<int>(std::min<std::int64_t>(turn.output_tokens, 2000000000LL));
+        if (chunk && !turn.streamed_any_text && !reply.text.empty()) {
+            try { chunk("text", reply.text); } catch (...) {}
+            turn.streamed_any_text = true;
+        }
+
+        state_.sent_keys = inputs.non_sys_keys;
+        state_.last_assistant_text = reply.text;
+        state_.last_assistant_tool_count = reply.tool_calls.size();
+        state_.last_time_anchor = inputs.primary_time_anchor;
+        state_.last_dynamic_sys_blob = inputs.dynamic_sys_blob;
+        state_.last_used = std::chrono::steady_clock::now();
+
+        out.handled = true;
+        out.streamed_any_text = turn.streamed_any_text;
+        out.reply = std::move(reply);
+        return out;
+    }
+
+private:
+    struct ActiveTurn {
+        bool has_tools = false;
+        ModelChunk chunk;
+        ReceptionTextStreamFilter filter;
+        std::string raw_text;
+        std::string result_response;
+        std::string error_detail;
+        bool streamed_any_text = false;
+        bool finished = false;
+        bool is_error = false;
+        std::int64_t input_tokens = 0;
+        std::int64_t output_tokens = 0;
+    };
+
+    void reader_loop() {
+        std::string pending;
+        char buf[4096];
+        DWORD n = 0;
+        HANDLE h = proc_.stdout_handle();
+        while (h && ReadFile(h, buf, sizeof(buf), &n, nullptr) && n > 0) {
+            pending.append(buf, n);
+            std::size_t nl = 0;
+            while ((nl = pending.find('\n')) != std::string::npos) {
+                std::string line = pending.substr(0, nl);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                pending.erase(0, nl + 1);
+                handle_agy_line(line);
+            }
+        }
+        if (!pending.empty()) handle_agy_line(pending);
+        alive_.store(false, std::memory_order_release);
+        turn_cv_.notify_all();
+    }
+
+    void handle_agy_line(std::string_view raw_line) {
+        const std::string line = trim_copy(ensure_valid_utf8(raw_line));
+        if (line.empty() || line.front() != '{') return;
+        Json doc;
+        try {
+            doc = Json::parse(line);
+        } catch (...) {
+            return;
+        }
+        if (!doc.is_object()) return;
+
+        const std::string ev = jstr(doc, "event");
+        std::lock_guard lk(turn_mu_);
+        if (!active_turn_) return;
+
+        if (ev == "step_update") {
+            const std::string step_type = jstr(doc, "step_type");
+            const std::string think_delta = jstr(doc, "thinking_delta");
+            if (!think_delta.empty() && active_turn_->chunk) {
+                try { active_turn_->chunk("thinking", think_delta); } catch (...) {}
+            } else if (step_type == "thought") {
+                const std::string t = jstr(doc, "text_delta", jstr(doc, "delta"));
+                if (!t.empty() && active_turn_->chunk) {
+                    try { active_turn_->chunk("thinking", t); } catch (...) {}
+                }
+            }
+            const std::string text_delta = jstr(doc, "text_delta", jstr(doc, "delta"));
+            if (!text_delta.empty() && step_type != "thought") {
+                active_turn_->raw_text += text_delta;
+                if (active_turn_->chunk) {
+                    if (active_turn_->has_tools) {
+                        active_turn_->filter.feed(text_delta, [&](std::string_view piece) {
+                            if (!piece.empty()) {
+                                active_turn_->streamed_any_text = true;
+                                try { active_turn_->chunk("text", piece); } catch (...) {}
+                            }
+                        });
+                    } else {
+                        active_turn_->streamed_any_text = true;
+                        try { active_turn_->chunk("text", text_delta); } catch (...) {}
+                    }
+                }
+            }
+        } else if (ev == "result") {
+            const std::string status = ascii_lower(jstr(doc, "status"));
+            active_turn_->result_response = jstr(doc, "response");
+            if (const auto* u = doc.find("usage"); u && u->is_object()) {
+                active_turn_->input_tokens = static_cast<std::int64_t>(jnum(*u, "input_tokens", 0));
+                active_turn_->output_tokens = static_cast<std::int64_t>(jnum(*u, "output_tokens", 0));
+            }
+            if (!status.empty() && status != "success" && status != "ok") {
+                active_turn_->is_error = true;
+                active_turn_->error_detail = jstr(doc, "error", active_turn_->result_response);
+            }
+            active_turn_->finished = true;
+            turn_cv_.notify_all();
+        } else if (ev == "error") {
+            active_turn_->is_error = true;
+            active_turn_->error_detail = jstr(doc, "message", jstr(doc, "error"));
+            active_turn_->finished = true;
+            turn_cv_.notify_all();
+        }
+    }
+
+    ResolvedReceptionRuntime rt_;
+    std::string fingerprint_;
+    std::string native_model_;
+    std::string reasoning_effort_;
+    CachedReceptionSessionState state_;
+    PersistentChildProcess proc_;
+    std::atomic<bool> alive_{false};
+    std::jthread stdout_reader_;
+
+    std::mutex turn_mu_;
+    std::condition_variable turn_cv_;
+    ActiveTurn* active_turn_ = nullptr;
+};
+
+class CliReceptionPool {
+public:
+    static CliReceptionPool& instance() {
+        static CliReceptionPool pool;
+        return pool;
+    }
+
+    ~CliReceptionPool() { shutdown(); }
+
+    void prewarm(const std::string& engine_id,
+                 const fs::path& data_root,
+                 const fs::path& app_root,
+                 const fs::path& wsl_executable,
+                 const std::string& sandbox_distribution,
+                 const std::string& execution_policy) {
+        if (engine_id != "kimi-code") return;
+        std::lock_guard lk(mu_);
+        if (shutting_down_) return;
+        if (prewarm_running_) return;
+        if (prewarm_thread_.joinable()) prewarm_thread_.join();
+        prewarm_running_ = true;
+        prewarm_thread_ = std::thread([this, engine_id, data_root, app_root, wsl_executable,
+                                       sandbox_distribution, execution_policy]() {
+            struct DoneGuard {
+                CliReceptionPool* self;
+                ~DoneGuard() {
+                    std::lock_guard lk2(self->mu_);
+                    self->prewarm_running_ = false;
+                }
+            } done_guard{this};
+            try {
+                auto rt = resolve_runtime(engine_id, data_root, app_root, wsl_executable,
+                                          sandbox_distribution, execution_policy);
+                if (!rt) return;
+                {
+                    std::lock_guard lk2(mu_);
+                    if (shutting_down_) return;
+                    for (const auto& slot : kimi_slots_) {
+                        if (slot.worker && slot.worker->runtime_key() == rt->runtime_key && slot.worker->is_alive()) {
+                            return; // Already warm!
+                        }
+                    }
+                }
+                auto worker = std::make_shared<KimiAcpWorker>(*rt);
+                if (!worker->start()) return;
+                std::lock_guard lk2(mu_);
+                if (shutting_down_) {
+                    worker->stop();
+                    return;
+                }
+                if (kimi_slots_.size() < 2U) {
+                    kimi_slots_.push_back(KimiSlot{std::move(worker), false});
+                } else {
+                    worker->stop();
+                }
+            } catch (...) {}
+        });
+    }
+
+    void shutdown() {
+        std::thread prewarm_to_join;
+        std::vector<std::shared_ptr<KimiAcpWorker>> kimi_to_stop;
+        std::vector<std::shared_ptr<AgyStreamWorker>> agy_to_stop;
+        {
+            std::lock_guard lk(mu_);
+            shutting_down_ = true;
+            if (prewarm_thread_.joinable()) {
+                prewarm_to_join = std::move(prewarm_thread_);
+            }
+            for (auto& s : kimi_slots_) {
+                if (s.worker) kimi_to_stop.push_back(std::move(s.worker));
+            }
+            kimi_slots_.clear();
+            for (auto& s : agy_slots_) {
+                if (s.worker) agy_to_stop.push_back(std::move(s.worker));
+            }
+            agy_slots_.clear();
+            runtime_cache_.clear();
+        }
+        for (auto& w : kimi_to_stop) w->stop();
+        for (auto& w : agy_to_stop) w->stop();
+        if (prewarm_to_join.joinable()) prewarm_to_join.join();
+        // Reset shutting_down_ only after everything is drained so subsequent unit tests in same process still work.
+        std::lock_guard lk(mu_);
+        shutting_down_ = false;
+    }
+
+    PoolCallOutcome try_call(const ModelConfig& config,
+                             const std::vector<ModelMessage>& messages,
+                             const std::vector<ModelTool>& tools,
+                             const fs::path& data_root,
+                             const fs::path& app_root,
+                             ModelChunk chunk,
+                             std::stop_token stop_tok,
+                             const fs::path& wsl_executable,
+                             const std::string& sandbox_distribution,
+                             const std::string& execution_policy,
+                             int timeout_seconds) {
+        PoolCallOutcome out;
+        if (config.cli_engine_id != "kimi-code" && config.cli_engine_id != "antigravity") {
+            return out;
+        }
+        auto rt = resolve_runtime(config.cli_engine_id, data_root, app_root, wsl_executable,
+                                  sandbox_distribution, execution_policy);
+        if (!rt) return out;
+
+        const std::string fingerprint = compute_cli_reception_system_fingerprint(config, messages, tools);
+        const ReceptionTurnInputs inputs = extract_reception_turn_inputs(messages);
+
+        if (config.cli_engine_id == "kimi-code") {
+            return call_kimi_acp(*rt, config, messages, tools, fingerprint, inputs,
+                                 std::move(chunk), stop_tok, timeout_seconds);
+        }
+        return call_agy_stream(*rt, config, messages, tools, fingerprint, inputs,
+                               std::move(chunk), stop_tok, timeout_seconds);
+    }
+
+private:
+    struct KimiSlot {
+        std::shared_ptr<KimiAcpWorker> worker;
+        bool busy = false;
+    };
+    struct AgySlot {
+        std::shared_ptr<AgyStreamWorker> worker;
+        bool busy = false;
+    };
+    struct RuntimeCacheEntry {
+        ResolvedReceptionRuntime rt;
+        std::chrono::steady_clock::time_point cached_at;
+    };
+
+    void evict_idle_locked(std::vector<std::shared_ptr<KimiAcpWorker>>& dead_kimi,
+                           std::vector<std::shared_ptr<AgyStreamWorker>>& dead_agy) {
+        const auto now = std::chrono::steady_clock::now();
+        constexpr auto kIdleTtl = std::chrono::minutes(10);
+        for (auto it = kimi_slots_.begin(); it != kimi_slots_.end();) {
+            if (!it->busy && (!it->worker || !it->worker->is_alive() || (now - it->worker->last_used() > kIdleTtl))) {
+                if (it->worker) dead_kimi.push_back(std::move(it->worker));
+                it = kimi_slots_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = agy_slots_.begin(); it != agy_slots_.end();) {
+            if (!it->busy && (!it->worker || !it->worker->is_alive() || (now - it->worker->last_used() > kIdleTtl))) {
+                if (it->worker) dead_agy.push_back(std::move(it->worker));
+                it = agy_slots_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    std::optional<ResolvedReceptionRuntime> resolve_runtime(const std::string& engine_id,
+                                                            const fs::path& data_root,
+                                                            const fs::path& app_root,
+                                                            const fs::path& wsl_executable,
+                                                            const std::string& sandbox_distribution,
+                                                            const std::string& execution_policy) {
+        const std::string policy = execution_policy.empty() ? std::string("sandbox_first") : execution_policy;
+        const std::string cache_key = engine_id + "|" + policy + "|" + path_to_utf8(data_root) + "|" +
+                                      path_to_utf8(app_root) + "|" + sandbox_distribution;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard lk(mu_);
+            if (shutting_down_) return std::nullopt;
+            if (auto it = runtime_cache_.find(cache_key); it != runtime_cache_.end()) {
+                if (now - it->second.cached_at < std::chrono::seconds(60)) {
+                    return it->second.rt;
+                }
+            }
+        }
+
+        const auto discovered = discover_cli_harnesses(app_root, wsl_executable, sandbox_distribution, policy);
+        for (const auto& h : discovered) {
+            if (h.id == engine_id && h.installed && !h.binary_path.empty()) {
+                std::error_code ec;
+                const fs::path sandbox_ws = fs::absolute(data_root / L"cli-reception-sandbox", ec);
+                fs::create_directories(sandbox_ws, ec);
+                ResolvedReceptionRuntime rt;
+                rt.engine_id = h.id;
+                rt.engine_name = h.name;
+                rt.platform = h.platform;
+                rt.binary_path = h.binary_path;
+                rt.wsl_exe = wsl_executable;
+                rt.sandbox_distribution = sandbox_distribution;
+                rt.sandbox_ws = sandbox_ws;
+                rt.runtime_key = h.id + "|" + h.platform + "|" + h.binary_path + "|" +
+                                 sandbox_distribution + "|" + path_to_utf8(sandbox_ws);
+                std::lock_guard lk(mu_);
+                runtime_cache_[cache_key] = RuntimeCacheEntry{rt, now};
+                return rt;
+            }
+        }
+        return std::nullopt;
+    }
+
+    PoolCallOutcome call_kimi_acp(const ResolvedReceptionRuntime& rt,
+                                  const ModelConfig& config,
+                                  const std::vector<ModelMessage>& messages,
+                                  const std::vector<ModelTool>& tools,
+                                  const std::string& fingerprint,
+                                  const ReceptionTurnInputs& inputs,
+                                  ModelChunk chunk,
+                                  std::stop_token stop_tok,
+                                  int timeout_seconds) {
+        std::shared_ptr<KimiAcpWorker> worker;
+        bool spawned_fresh = false;
+        {
+            std::vector<std::shared_ptr<KimiAcpWorker>> dead_kimi;
+            std::vector<std::shared_ptr<AgyStreamWorker>> dead_agy;
+            {
+                std::lock_guard lk(mu_);
+                if (shutting_down_) return {};
+                evict_idle_locked(dead_kimi, dead_agy);
+
+                // Prefer an idle warm worker that already holds this exact conversation session.
+                for (auto& s : kimi_slots_) {
+                    if (!s.busy && s.worker && s.worker->runtime_key() == rt.runtime_key &&
+                        s.worker->is_alive() && s.worker->has_matching_session(fingerprint, inputs)) {
+                        s.busy = true;
+                        worker = s.worker;
+                        break;
+                    }
+                }
+                if (!worker) {
+                    for (auto& s : kimi_slots_) {
+                        if (!s.busy && s.worker && s.worker->runtime_key() == rt.runtime_key && s.worker->is_alive()) {
+                            s.busy = true;
+                            worker = s.worker;
+                            break;
+                        }
+                    }
+                }
+            }
+            for (auto& w : dead_kimi) w->stop();
+            for (auto& w : dead_agy) w->stop();
+        }
+
+        if (!worker) {
+            auto created = std::make_shared<KimiAcpWorker>(rt);
+            if (!created->start()) {
+                return {};
+            }
+            std::lock_guard lk(mu_);
+            if (shutting_down_) {
+                created->stop();
+                return {};
+            }
+            if (kimi_slots_.size() < 2U) {
+                kimi_slots_.push_back(KimiSlot{created, true});
+                worker = std::move(created);
+                spawned_fresh = true;
+            } else {
+                // Both pool slots are concurrently busy; still run this request on the temporary worker and stop after.
+                worker = std::move(created);
+                spawned_fresh = true;
+            }
+        }
+
+        struct ReleaseGuard {
+            CliReceptionPool* self;
+            std::shared_ptr<KimiAcpWorker> w;
+            bool pooled = false;
+            ~ReleaseGuard() {
+                bool should_stop = false;
+                {
+                    std::lock_guard lk(self->mu_);
+                    for (auto it = self->kimi_slots_.begin(); it != self->kimi_slots_.end(); ++it) {
+                        if (it->worker == w) {
+                            pooled = true;
+                            if (!w->is_alive() || self->shutting_down_) {
+                                should_stop = true;
+                                self->kimi_slots_.erase(it);
+                            } else {
+                                it->busy = false;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!pooled || should_stop) {
+                    w->stop();
+                }
+            }
+        } guard{this, worker};
+        (void)spawned_fresh;
+
+        return worker->run_turn(config, messages, tools, fingerprint, inputs,
+                                std::move(chunk), stop_tok, timeout_seconds);
+    }
+
+    PoolCallOutcome call_agy_stream(const ResolvedReceptionRuntime& rt,
+                                    const ModelConfig& config,
+                                    const std::vector<ModelMessage>& messages,
+                                    const std::vector<ModelTool>& tools,
+                                    const std::string& fingerprint,
+                                    const ReceptionTurnInputs& inputs,
+                                    ModelChunk chunk,
+                                    std::stop_token stop_tok,
+                                    int timeout_seconds) {
+        std::shared_ptr<AgyStreamWorker> worker;
+        {
+            std::vector<std::shared_ptr<KimiAcpWorker>> dead_kimi;
+            std::vector<std::shared_ptr<AgyStreamWorker>> dead_agy;
+            {
+                std::lock_guard lk(mu_);
+                if (shutting_down_) return {};
+                evict_idle_locked(dead_kimi, dead_agy);
+
+                for (auto& s : agy_slots_) {
+                    if (!s.busy && s.worker && s.worker->runtime_key() == rt.runtime_key &&
+                        s.worker->can_reuse_for(fingerprint, inputs)) {
+                        s.busy = true;
+                        worker = s.worker;
+                        break;
+                    }
+                }
+            }
+            for (auto& w : dead_kimi) w->stop();
+            for (auto& w : dead_agy) w->stop();
+        }
+
+        if (!worker) {
+            auto created = std::make_shared<AgyStreamWorker>(rt, fingerprint, config.cli_native_model, config.reasoning_effort);
+            if (!created->start()) {
+                return {};
+            }
+            std::shared_ptr<AgyStreamWorker> evicted;
+            {
+                std::lock_guard lk(mu_);
+                if (shutting_down_) {
+                    created->stop();
+                    return {};
+                }
+                if (agy_slots_.size() >= 4U) {
+                    // Evict oldest idle LRU slot.
+                    auto oldest = agy_slots_.end();
+                    for (auto it = agy_slots_.begin(); it != agy_slots_.end(); ++it) {
+                        if (!it->busy && (oldest == agy_slots_.end() ||
+                                          it->worker->last_used() < oldest->worker->last_used())) {
+                            oldest = it;
+                        }
+                    }
+                    if (oldest != agy_slots_.end()) {
+                        evicted = std::move(oldest->worker);
+                        agy_slots_.erase(oldest);
+                    }
+                }
+                if (agy_slots_.size() < 4U) {
+                    agy_slots_.push_back(AgySlot{created, true});
+                }
+                worker = std::move(created);
+            }
+            if (evicted) evicted->stop();
+        }
+
+        struct ReleaseGuard {
+            CliReceptionPool* self;
+            std::shared_ptr<AgyStreamWorker> w;
+            bool pooled = false;
+            ~ReleaseGuard() {
+                bool should_stop = false;
+                {
+                    std::lock_guard lk(self->mu_);
+                    for (auto it = self->agy_slots_.begin(); it != self->agy_slots_.end(); ++it) {
+                        if (it->worker == w) {
+                            pooled = true;
+                            if (!w->is_alive() || self->shutting_down_) {
+                                should_stop = true;
+                                self->agy_slots_.erase(it);
+                            } else {
+                                it->busy = false;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!pooled || should_stop) {
+                    w->stop();
+                }
+            }
+        } guard{this, worker};
+
+        return worker->run_turn(config, messages, tools, inputs,
+                                std::move(chunk), stop_tok, timeout_seconds);
+    }
+
+    std::mutex mu_;
+    bool shutting_down_ = false;
+    bool prewarm_running_ = false;
+    std::thread prewarm_thread_;
+    std::vector<KimiSlot> kimi_slots_;
+    std::vector<AgySlot> agy_slots_;
+    std::map<std::string, RuntimeCacheEntry> runtime_cache_;
+};
+
+} // namespace
+
+void prewarm_cli_reception_engine(const std::string& engine_id,
+                                  const std::filesystem::path& data_root,
+                                  const std::filesystem::path& app_root,
+                                  const std::filesystem::path& wsl_executable,
+                                  const std::string& sandbox_distribution,
+                                  const std::string& execution_policy) {
+    CliReceptionPool::instance().prewarm(engine_id, data_root, app_root, wsl_executable,
+                                         sandbox_distribution, execution_policy);
+}
+
+void shutdown_cli_reception_pool() {
+    CliReceptionPool::instance().shutdown();
+}
+
+ModelReply call_cli_as_work_lead(const ModelConfig& config,
+                                 const std::vector<ModelMessage>& messages,
+                                 const std::vector<ModelTool>& tools,
+                                 const std::filesystem::path& data_root,
+                                 const std::filesystem::path& app_root,
+                                 ModelChunk chunk,
+                                 std::stop_token stop,
+                                 const std::filesystem::path& wsl_executable,
+                                 const std::string& sandbox_distribution,
+                                 const std::string& execution_policy) {
+    if (config.protocol != "cli-reception" || config.cli_engine_id.empty()) {
+        throw ModelError(ModelFailure::Transport, "无效的 Work 接待 CLI 模型配置");
+    }
+
+    const int timeout_sec = std::clamp(config.timeout_ms > 0 ? (config.timeout_ms / 1000) : 300, 30, 600);
+
+    // P2 Fast-Path: persistent warm CLI daemon pool (zero cold-start + KV Prompt Cache + real token streaming).
+    if (config.cli_engine_id == "kimi-code" || config.cli_engine_id == "antigravity") {
+        auto pool_res = CliReceptionPool::instance().try_call(
+            config, messages, tools, data_root, app_root, chunk, stop,
+            wsl_executable, sandbox_distribution, execution_policy, timeout_sec);
+        if (pool_res.cancelled || stop.stop_requested()) {
+            throw ModelError(ModelFailure::Cancelled, "Work 接待 CLI 推理已取消");
+        }
+        if (pool_res.handled) {
+            if (pool_res.timed_out) {
+                throw ModelError(ModelFailure::Timeout,
+                                 "本机 Code CLI (" + config.cli_engine_id + ") 接待超时：" + pool_res.error_detail);
+            }
+            if (!pool_res.error_detail.empty()) {
+                throw ModelError(ModelFailure::Transport,
+                                 "本机 Code CLI (" + config.cli_engine_id + ") 接待失败：" + pool_res.error_detail);
+            }
+            return std::move(pool_res.reply);
+        }
+        // If the persistent daemon failed before streaming any text to the user, transparently fall back to oneshot.
+    }
+
+    std::error_code ec;
+    const fs::path sandbox_ws = data_root / L"cli-reception-sandbox";
+    fs::create_directories(sandbox_ws, ec);
+
+    const bool is_chat_mode = (config.context_feature == "chat" || config.context_feature == "group");
+    CliHarnessRunRequest req;
+    req.engine_id = config.cli_engine_id;
+    req.model_source = "native";
+    req.bot_id = is_chat_mode ? "chat-reception" : "work-lead";
+    req.session_key = std::string(is_chat_mode ? "chat-reception-" : "work-lead-") + config.cli_engine_id + "-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    req.prompt = build_cli_reception_prompt(messages, tools, config.context_feature, config.cli_engine_id);
+    req.constraints.forbid_skills = true;
+    req.constraints.forbid_tests = true;
+    req.work_slot_model.thinking_enabled = config.thinking_enabled;
+    req.work_slot_model.reasoning_effort = config.reasoning_effort;
+    req.native_provider = config.cli_native_provider;
+    req.native_model = config.cli_native_model;
+    req.workspace_dir = sandbox_ws;
+    req.data_root = data_root;
+    req.app_root = app_root;
+    req.wsl_executable = wsl_executable;
+    req.sandbox_distribution = sandbox_distribution;
+    req.execution_policy = execution_policy.empty() ? std::string("sandbox_first") : execution_policy;
+    req.require_exact_engine = true;
+    req.read_only_reception = true;
+    req.timeout_seconds = timeout_sec;
+
+    bool streamed_text = false;
+    ReceptionTextStreamFilter stream_filter;
+    const bool has_tools = !tools.empty();
+    CliHarnessRunResult cli_res;
+    try {
+        cli_res = run_cli_harness(
+            req,
+            [&](const NormalizedCliEvent& ev) {
+                if (!chunk) return;
+                if (ev.kind == "thinking" && !ev.text.empty()) {
+                    chunk("thinking", ev.text);
+                } else if (ev.kind == "commentary" && !ev.text.empty()) {
+                    if (has_tools) {
+                        stream_filter.feed(ev.text, [&](std::string_view piece) {
+                            if (!piece.empty()) {
+                                streamed_text = true;
+                                chunk("text", piece);
+                            }
+                        });
+                    } else {
+                        streamed_text = true;
+                        chunk("text", ev.text);
+                    }
+                }
+            },
+            stop);
+    } catch (const std::exception& ex) {
+        throw ModelError(ModelFailure::Transport,
+                         "无法调用本机 Code CLI (" + config.cli_engine_id + ") 执行接待推理：" + ex.what());
+    }
+
+    if (has_tools && chunk && !cli_res.cancelled) {
+        stream_filter.flush([&](std::string_view piece) {
+            if (!piece.empty()) {
+                streamed_text = true;
+                chunk("text", piece);
+            }
+        });
+    }
+
+    if (cli_res.cancelled || stop.stop_requested()) {
+        throw ModelError(ModelFailure::Cancelled, "Work 接待 CLI 推理已取消");
+    }
+    if (!cli_res.success) {
+        const std::string detail = !cli_res.error_detail.empty()
+            ? cli_res.error_detail
+            : ("退出码 " + std::to_string(cli_res.exit_code));
+        if (detail.find("超过单轮时间上限") != std::string::npos) {
+            throw ModelError(ModelFailure::Timeout, "本机 Code CLI (" + cli_res.resolved_engine_name + ") 接待超时：" + detail);
+        }
+        throw ModelError(ModelFailure::Transport, "本机 Code CLI (" + cli_res.resolved_engine_name + ") 接待失败：" + detail);
+    }
+
+    ModelReply reply = parse_cli_reception_reply(cli_res.final_response, tools);
+    reply.input_tokens = static_cast<int>(std::min<std::int64_t>(cli_res.input_tokens, 2000000000LL));
+    reply.output_tokens = static_cast<int>(std::min<std::int64_t>(cli_res.output_tokens, 2000000000LL));
+    if (chunk && !streamed_text && !reply.text.empty()) {
+        chunk("text", reply.text);
+    }
+    return reply;
 }
 
 } // namespace dimension

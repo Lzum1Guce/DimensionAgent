@@ -249,7 +249,7 @@ html[data-motion="off"] .atelier-fx-layer { display: none !important; }
 
 /* ───────── 全局：选中色与焦点环兜底 ───────── */
 ::selection { background: color-mix(in srgb, var(--color-accent) 26%, transparent); color: inherit; }
-html[data-theme="nightink"] ::selection { background: color-mix(in srgb, var(--color-accent) 36%, transparent); }
+html:is([data-theme="nightink"], [data-theme="codex"]) ::selection { background: color-mix(in srgb, var(--color-accent) 36%, transparent); }
 #composerInput { caret-color: var(--color-accent); }
 .model-option-check { color: var(--color-accent); }
 

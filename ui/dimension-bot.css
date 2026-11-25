@@ -58,12 +58,12 @@
 .dimension-bot.is-light .dbot-sclera { stroke: #2a2723; stroke-opacity: 0.28; stroke-width: 1.1; }
 .dimension-bot.is-light .dbot-shine { opacity: 0; }
 
-/* 夜墨主题：给深色圆球一圈柔光描边，小草芽略提亮保持清新 */
-html[data-theme="nightink"] .dimension-bot {
+/* 夜墨与 Codex 深色主题：给深色圆球一圈柔光描边，小草芽略提亮保持清新 */
+html:is([data-theme="nightink"], [data-theme="codex"]) .dimension-bot {
   --dbot-sprout: #82D46C;
   --dbot-sprout-deep: #58A846;
 }
-html[data-theme="nightink"] .dimension-bot:not(.is-light) .dbot-body { stroke: rgb(255 255 255 / 0.18); stroke-width: 1.8; }
+html:is([data-theme="nightink"], [data-theme="codex"]) .dimension-bot:not(.is-light) .dbot-body { stroke: rgb(255 255 255 / 0.18); stroke-width: 1.8; }
 
 /* 极小尺寸（如输入框旁的思考小球）：精简叶脉与小高光，保持轮廓清晰 */
 .dimension-bot.is-tiny .dbot-leaf-vein,

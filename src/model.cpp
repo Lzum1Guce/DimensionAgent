@@ -1,4 +1,5 @@
 #include "dimension/model.hpp"
+#include "dimension/network_proxy.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -20,6 +21,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -1036,9 +1038,16 @@ ModelReply call_model(const ModelConfig& config, const std::vector<ModelMessage>
     if (!config.api_key.empty()) headers += L"Authorization: Bearer " + wide(config.api_key) + L"\r\n";
     check_active(stop, deadline);
 
-    static HINTERNET shared_session = []() -> HINTERNET {
-        HINTERNET h = WinHttpOpen(L"DimensionAgentNative/0.4", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC);
+    auto acquire_model_session = []() -> std::shared_ptr<void> {
+        static std::mutex session_mu;
+        static std::uint64_t cached_gen = 0;
+        static std::shared_ptr<void> cached_session;
+        const std::uint64_t cur_gen = network_proxy_generation();
+        std::lock_guard lk(session_mu);
+        if (cached_session && cached_gen == cur_gen) {
+            return cached_session;
+        }
+        HINTERNET h = open_configured_winhttp_session(L"DimensionAgentNative/0.4", WINHTTP_FLAG_ASYNC);
         if (!h) network_error(GetLastError());
         DWORD max_conns = 32;
         WinHttpSetOption(h, WINHTTP_OPTION_MAX_CONNS_PER_SERVER, &max_conns, sizeof(max_conns));
@@ -1049,9 +1058,14 @@ ModelReply call_model(const ModelConfig& config, const std::vector<ModelMessage>
         WinHttpSetOption(h, WINHTTP_OPTION_ENABLE_HTTP_PROTOCOL, &proto, sizeof(proto));
 #endif
 #endif
-        return h;
-    }();
-    InternetHandle connection(WinHttpConnect(shared_session, target.host.c_str(), target.port, 0));
+        cached_session = std::shared_ptr<void>(h, [](void* p) {
+            if (p) WinHttpCloseHandle(static_cast<HINTERNET>(p));
+        });
+        cached_gen = cur_gen;
+        return cached_session;
+    };
+    const auto shared_session_guard = acquire_model_session();
+    InternetHandle connection(WinHttpConnect(static_cast<HINTERNET>(shared_session_guard.get()), target.host.c_str(), target.port, 0));
     AsyncRequest request(WinHttpOpenRequest(connection.get(), L"POST", target.path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, target.secure ? WINHTTP_FLAG_SECURE : 0));
     if (!WinHttpSetTimeouts(request.get(), connect_ms, connect_ms, idle_ms, idle_ms)) network_error(GetLastError());
@@ -1133,8 +1147,7 @@ bool ModelError::may_upgrade() const noexcept {
 
 static std::string bounded_get(const Endpoint& target,const std::wstring& headers,int timeout,bool json_only,std::stop_token stop) {
     const auto deadline=Clock::now()+std::chrono::milliseconds(timeout);
-    InternetHandle session(WinHttpOpen(L"DimensionAgentNative/0.2", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC));
+    InternetHandle session(open_configured_winhttp_session(L"DimensionAgentNative/0.2", WINHTTP_FLAG_ASYNC));
     if (!WinHttpSetTimeouts(session.get(), timeout, timeout, timeout, timeout)) network_error(GetLastError());
     InternetHandle connection(WinHttpConnect(session.get(), target.host.c_str(), target.port, 0));
     AsyncRequest request(WinHttpOpenRequest(connection.get(), L"GET", target.path.c_str(), nullptr,

@@ -34,6 +34,11 @@
   grid-template-columns: minmax(0, 1fr) var(--work-dock-width, 460px);
 }
 
+/* Reserve a crisp 36px corridor on the right of the center stage so hanging bookmark strips never overlap bubbles or scrollbar */
+#workspace.has-work-dock:not(.work-dock-overlay) > #chatStage {
+  padding-right: 36px;
+}
+
 body.is-resizing-work-dock,
 body.is-resizing-work-dock * {
   cursor: col-resize !important;
@@ -1730,22 +1735,44 @@ body.is-resizing-work-dock #workspace {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: transparent;
+  z-index: 6;
+  overflow: visible;
+}
+
+.wb-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
   background: var(--color-panel);
   border-left: 1px solid var(--color-edge);
-  z-index: 4;
   overflow: hidden;
+  z-index: 2;
 }
 
 #workspace.work-dock-overlay .work-dock {
   position: fixed;
   top: 0;
   right: 0;
-  width: min(480px, 88vw);
+  width: min(510px, 90vw);
   height: 100%;
   height: var(--app-height, 100dvh);
+  display: flex;
+  flex-direction: row;
+  background: var(--color-panel);
+  border-left: 1px solid var(--color-edge);
   box-shadow: var(--shadow-xl);
   z-index: 22;
+  overflow: hidden;
   animation: var(--animate-panel-in);
+}
+
+#workspace.work-dock-overlay .work-dock.is-wide-tab {
+  width: min(700px, 94vw);
 }
 
 .work-dock-resizer {
@@ -3862,7 +3889,7 @@ body.is-resizing-work-dock #workspace {
   from { opacity: 0; transform: translateY(calc(-100% - 4px)); }
   to { opacity: 1; transform: translateY(calc(-100% - 14px)); }
 }
-html[data-theme="nightink"] .work-approval-pill {
+html:is([data-theme="nightink"], [data-theme="codex"]) .work-approval-pill {
   color: var(--color-accent);
   border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-edge));
 }
@@ -3903,4 +3930,743 @@ html[data-theme="nightink"] .work-approval-pill {
   content: "  ✓ 已复制";
   color: var(--color-success);
   font-family: var(--font-sans);
+}
+
+/* ==========================================================================
+   Work Built-in Multi-Tab Browser: Hand-Journal Bookmark Index Strips
+   (Wide mode: hanging strips on left outer edge; Narrow overlay: tucked left spine)
+   ========================================================================== */
+.wb-bookmarks {
+  position: absolute;
+  top: 48px;
+  right: 100%;
+  width: 40px;
+  max-height: calc(100% - 132px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.wb-bookmarks > * {
+  pointer-events: auto;
+}
+
+.wb-tabs {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  overflow-y: auto;
+  overflow-x: visible;
+  padding: 2px 0 2px 4px;
+  scrollbar-width: none;
+}
+
+.wb-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.wb-dynamic-tabs {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.wb-tab {
+  --bm-stripe: var(--color-accent);
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 31px;
+  min-height: 62px;
+  max-height: 124px;
+  padding: 8px 4px 8px 6px;
+  border: 1px solid var(--color-edge);
+  border-right: 0;
+  border-radius: 10px 0 0 10px;
+  background: color-mix(in srgb, var(--color-inset) 74%, var(--color-raised));
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.15;
+  cursor: pointer;
+  box-shadow: -2px 2px 7px rgba(24, 18, 12, 0.08);
+  transition: width 0.16s cubic-bezier(0.22, 1, 0.36, 1), background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+}
+
+/* Color-coded paper tape stripe along the outer left edge of each bookmark strip */
+.wb-tab::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3.5px;
+  background: var(--bm-stripe);
+  opacity: 0.72;
+  transition: opacity 0.15s ease, width 0.15s ease;
+}
+
+.wb-tab.is-tone-home { --bm-stripe: var(--color-accent, #d97757); }
+.wb-tab.is-tone-canvas { --bm-stripe: #5b6fe6; }
+.wb-tab.is-tone-desktop { --bm-stripe: #2b8399; }
+.wb-tab.is-tone-web-0 { --bm-stripe: #4d8b6f; }
+.wb-tab.is-tone-web-1 { --bm-stripe: #7d68a8; }
+.wb-tab.is-tone-web-2 { --bm-stripe: #c87454; }
+
+.wb-tab:hover {
+  width: 36px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  box-shadow: -3px 3px 10px rgba(24, 18, 12, 0.12);
+}
+
+.wb-tab:hover::before {
+  opacity: 0.95;
+}
+
+/* Active bookmark strip seamlessly merges into the right panel paper surface */
+.wb-tab.is-active {
+  width: 37px;
+  margin-right: -1px;
+  padding-right: 5px;
+  background: var(--color-panel);
+  border-color: color-mix(in srgb, var(--bm-stripe) 38%, var(--color-edge));
+  color: var(--color-ink);
+  font-weight: 600;
+  box-shadow: -4px 3px 12px rgba(24, 18, 12, 0.11);
+  z-index: 4;
+}
+
+.wb-tab.is-active::before {
+  width: 4px;
+  opacity: 1;
+}
+
+.wb-tab-ico {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bm-stripe);
+  opacity: 0.88;
+}
+
+.wb-tab.is-active .wb-tab-ico {
+  opacity: 1;
+}
+
+.wb-tab-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  letter-spacing: 0.08em;
+  max-height: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-tab-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bm-stripe);
+  opacity: 0.72;
+}
+
+.wb-tab.is-active .wb-tab-dot {
+  opacity: 1;
+}
+
+.wb-tab-dot.is-loading {
+  opacity: 1;
+  animation: wbPulse 0.9s ease-in-out infinite;
+}
+
+@keyframes wbPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.22); }
+}
+
+.wb-tab-x {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 5px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--color-ink-tertiary);
+  opacity: 0.65;
+}
+
+.wb-tab:hover .wb-tab-x,
+.wb-tab.is-active .wb-tab-x {
+  opacity: 1;
+}
+
+.wb-tab-x:hover {
+  background: color-mix(in srgb, var(--color-ink) 12%, transparent);
+  color: var(--color-ink);
+}
+
+.wb-newtab {
+  flex: none;
+  width: 30px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-composer-ring);
+  border-right: 0;
+  border-radius: 9px 0 0 9px;
+  background: color-mix(in srgb, var(--color-raised) 82%, transparent);
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: -2px 2px 6px rgba(24, 18, 12, 0.06);
+  transition: width 0.15s ease, background 0.15s ease, border-style 0.15s ease, color 0.15s ease;
+}
+
+.wb-newtab:hover {
+  width: 35px;
+  border-style: solid;
+  border-color: var(--color-accent);
+  background: var(--color-raised);
+  color: var(--color-accent);
+}
+
+/* Narrow overlay mode: gracefully tuck bookmark strips into an inner left spine so nothing clips off-screen */
+#workspace.work-dock-overlay .wb-bookmarks {
+  position: static;
+  flex: none;
+  width: 40px;
+  max-height: none;
+  height: 100%;
+  padding: 46px 0 12px 3px;
+  background: color-mix(in srgb, var(--color-inset) 78%, var(--color-panel));
+  border-right: 1px solid var(--color-edge);
+  pointer-events: auto;
+}
+
+#workspace.work-dock-overlay .wb-shell {
+  border-left: 0;
+}
+
+#workspace.work-dock-overlay .wb-tab {
+  box-shadow: none;
+}
+
+#workspace.work-dock-overlay .wb-tab.is-active {
+  margin-right: -1px;
+  box-shadow: -2px 2px 6px rgba(24, 18, 12, 0.07);
+}
+
+.wb-desktop-topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-edge);
+  background: var(--color-panel);
+}
+
+.wb-desktop-crumb {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-ink-secondary);
+}
+
+.wb-navbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-edge);
+}
+
+.wb-nav-btn,
+.wb-tool-btn {
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 8px;
+  background: var(--color-raised);
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wb-nav-btn {
+  width: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+
+.wb-nav-btn:hover:not(:disabled),
+.wb-tool-btn:hover:not(:disabled) {
+  background: var(--color-raised-hover);
+  color: var(--color-ink);
+}
+
+.wb-nav-btn:disabled,
+.wb-tool-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.wb-tool-btn.is-quote {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-composer-ring));
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-raised));
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.wb-tool-btn.is-quote:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 20%, var(--color-raised));
+}
+
+.wb-url-form {
+  flex: 1;
+  min-width: 80px;
+  display: flex;
+}
+
+.wb-url-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 8px;
+  background: var(--color-inset);
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.wb-url-input:focus {
+  border-color: var(--color-accent);
+  background: var(--color-raised);
+}
+
+.wb-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.wb-pane[hidden] {
+  display: none !important;
+}
+
+.wb-pane-home .work-dock-head {
+  padding: 6px 12px;
+}
+
+.wb-web-status {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--color-danger, #b42318);
+  background: color-mix(in srgb, var(--color-danger, #b42318) 8%, var(--color-panel));
+  border-bottom: 1px solid var(--color-edge);
+}
+
+.wb-startpage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.wb-start-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wb-start-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+
+.wb-start-sub {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-ink-secondary);
+}
+
+.wb-start-search {
+  display: flex;
+  gap: 8px;
+}
+
+.wb-start-input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 10px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.wb-start-input:focus {
+  border-color: var(--color-accent);
+}
+
+.wb-start-go {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  border-radius: 10px;
+  background: var(--color-accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.wb-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: 10px;
+}
+
+.wb-quick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-edge);
+  border-radius: 12px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s ease, transform 0.14s ease, background 0.14s ease;
+}
+
+.wb-quick-card:hover {
+  border-color: var(--color-accent);
+  background: var(--color-raised-hover);
+  transform: translateY(-1px);
+}
+
+.wb-quick-card.is-dev {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-edge));
+  background: color-mix(in srgb, var(--color-accent) 9%, var(--color-raised));
+}
+
+.wb-quick-card strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.wb-quick-card span {
+  font-size: 11.5px;
+  color: var(--color-ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.wb-start-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-edge);
+}
+
+.wb-quick-link-btn {
+  padding: 7px 12px;
+  border: 1px solid var(--color-composer-ring);
+  border-radius: 9px;
+  background: var(--color-raised);
+  color: var(--color-ink-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wb-quick-link-btn:hover {
+  color: var(--color-ink);
+  border-color: var(--color-accent);
+}
+
+.wb-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  background: var(--color-panel);
+  overflow: hidden;
+}
+
+.wb-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-fallback-iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.wb-fallback-card {
+  margin: auto;
+  max-width: 420px;
+  padding: 20px 22px;
+  border: 1px solid var(--color-edge);
+  border-radius: 14px;
+  background: var(--color-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: center;
+}
+
+.wb-fallback-card p {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* Embedded Linux Desktop inside Work Browser Tab */
+.wb-desktop-host {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 16px;
+}
+
+.ld-surface.is-embedded {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--color-ink);
+}
+
+.ld-surface.is-embedded button,
+.ld-surface.is-embedded select,
+.ld-surface.is-embedded input,
+.ld-surface.is-embedded textarea {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--color-composer-ring);
+  background: var(--color-raised);
+  color: var(--color-ink);
+}
+
+.ld-surface.is-embedded button {
+  cursor: pointer;
+}
+
+.ld-surface.is-embedded button:hover:not(:disabled) {
+  background: var(--color-raised-hover);
+}
+
+.ld-surface.is-embedded button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.ld-surface.is-embedded .ld-head {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-edge);
+}
+
+.ld-surface.is-embedded .ld-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ld-surface.is-embedded .ld-network-wrap {
+  margin-left: auto;
+}
+
+.ld-surface.is-embedded .ld-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--color-ink-tertiary);
+}
+
+.ld-surface.is-embedded .ld-workspace,
+.ld-surface.is-embedded .ld-notice,
+.ld-surface.is-embedded .ld-state,
+.ld-surface.is-embedded .ld-library p {
+  color: var(--color-ink-secondary);
+}
+
+.ld-surface.is-embedded .ld-screen-wrap {
+  margin: 2px 0;
+  border: 1px solid var(--color-edge);
+  border-radius: 10px;
+  background: #14171d;
+}
+
+.ld-surface.is-embedded .ld-screen {
+  width: 100%;
+  max-height: 58vh;
+  object-fit: contain;
+}
+
+.ld-surface.is-embedded .ld-library {
+  border-top: 1px solid var(--color-edge);
+  padding-top: 8px;
+}
+
+.work-cwd-pick.is-browser-pill.is-active {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-raised));
+  color: var(--color-accent);
+}
+
+/* ---------- DimensionImage Blueprint Plan Card in Work Thread ---------- */
+.work-plan-btn-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.work-blueprint-plan-card {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #6366f1 34%, var(--color-edge));
+  background: linear-gradient(135deg, color-mix(in srgb, #6366f1 8%, var(--color-panel)), color-mix(in srgb, #c026d3 6%, var(--color-panel)));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.work-bp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.work-bp-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.work-bp-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: color-mix(in srgb, #6366f1 18%, var(--color-panel));
+  color: color-mix(in srgb, #4f46e5 88%, var(--color-ink));
+}
+
+.work-bp-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-bp-stats {
+  font-size: 11.5px;
+  color: var(--color-ink-secondary);
+}
+
+.work-bp-desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-ink-secondary);
+}
+
+.work-bp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.work-bp-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  background: color-mix(in srgb, var(--color-panel) 84%, transparent);
+  color: var(--color-ink);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-bp-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
 }

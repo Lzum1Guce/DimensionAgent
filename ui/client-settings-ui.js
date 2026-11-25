@@ -1,4 +1,6 @@
 import { bindContextLimits } from './context-limits-ui.js';
+import { bindCliSandboxSettings } from './cli-sandbox-settings-ui.js';
+import { bindNetworkProxySettings } from './network-proxy-ui.js';
 
 const STORAGE_KEY = 'dimension-client-settings';
 const defaults = {
@@ -17,7 +19,7 @@ export function readClientSettings() {
   const injected = window.__dimensionClientSettings || {};
   const next = { ...defaults, ...injected, ...saved };
   if (!['zh-CN', 'en'].includes(next.language)) next.language = 'zh-CN';
-  if (!['paperlight', 'warmamber', 'nightink', 'system'].includes(next.theme)) next.theme = 'paperlight';
+  if (!['paperlight', 'warmamber', 'nightink', 'codex', 'codexlight', 'system'].includes(next.theme)) next.theme = 'paperlight';
   next.closeToTray = next.closeToTray !== false;
   next.rememberWindowPosition = next.rememberWindowPosition !== false;
   next.notificationsEnabled = next.notificationsEnabled !== false;
@@ -30,6 +32,8 @@ export function resolvedTheme(theme = readClientSettings().theme) {
   if (theme === 'system') {
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'nightink' : 'paperlight';
   }
+  if (theme === 'codex') return 'codex';
+  if (theme === 'codexlight') return 'codexlight';
   if (theme === 'nightink') return 'nightink';
   if (theme === 'warmamber') return 'warmamber';
   return 'paperlight';
@@ -66,6 +70,8 @@ export function bindClientSettings({ api } = {}) {
   if (!dialog || !gear) return { open() {}, close() {} };
 
   let contextCtrl = null;
+  let cliSandboxCtrl = null;
+  let networkProxyCtrl = null;
   const GROUP_ACT_META = {
     quiet:    { label: '安静', hint: '极简省 Token，仅最相关成员开口，旁观者默认潜水。' },
     balanced: { label: '日常', hint: '自然的群聊节奏，主角稳接对话、旁观适度起哄。推荐日常使用。' },
@@ -214,6 +220,28 @@ export function bindClientSettings({ api } = {}) {
       }
       void contextCtrl.load();
     }
+    if (name === 'cli-sandbox' && api) {
+      if (!cliSandboxCtrl) {
+        const host = dialog.querySelector('#csCliSandboxHost');
+        cliSandboxCtrl = bindCliSandboxSettings({
+          api,
+          host,
+          onHarnessesChanged: (harnesses) => {
+            window.dispatchEvent(new CustomEvent('dimension:cli-sandbox-updated', { detail: { harnesses } }));
+          },
+        });
+      }
+      void cliSandboxCtrl.load();
+    } else {
+      cliSandboxCtrl?.pausePolling?.();
+    }
+    if (name === 'network-proxy' && api) {
+      if (!networkProxyCtrl) {
+        const host = dialog.querySelector('#csNetworkProxyHost');
+        networkProxyCtrl = bindNetworkProxySettings({ api, host });
+      }
+      void networkProxyCtrl.load();
+    }
   };
 
   let returnFocus = null;
@@ -227,10 +255,13 @@ export function bindClientSettings({ api } = {}) {
     } else {
       const activeNav = dialog.querySelector('.cs-nav-item.is-active');
       if (activeNav?.dataset.csPane === 'context') void contextCtrl?.load();
+      if (activeNav?.dataset.csPane === 'cli-sandbox') void cliSandboxCtrl?.load();
+      if (activeNav?.dataset.csPane === 'network-proxy') void networkProxyCtrl?.load();
     }
     (dialog.querySelector('.cs-nav-item.is-active') || dialog.querySelector('#clientSettingsClose'))?.focus();
   };
   const close = () => {
+    cliSandboxCtrl?.pausePolling?.();
     dialog.hidden = true;
     mask.hidden = true;
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });

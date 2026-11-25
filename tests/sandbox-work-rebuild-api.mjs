@@ -67,7 +67,7 @@ try{
  await api('/api/dimension/work/settings',{botId,cliEngine:'builtin',approvalMode:'full',networkAccess:false},'PATCH');
  await api('/api/providers',{name:'rebuild-fixture',entry:{kind:'openai-chat-compat',baseUrl:'http://127.0.0.1:'+model.address().port+'/v1',spec:{model:'fixture-rebuild'},secret:{kind:'literal',value:'synthetic-only'}}});
  await api('/api/providers/rebuild-fixture/activate',{});
- const run=(await api('/api/dimension/work/runs',{botId,requestId:'rebuild',text:'验证真实构建、源码修改后的重建、失败后重试和完整日志保存'})).run;
+ const run=(await api('/api/dimension/work/runs',{botId,requestId:'rebuild',text:'直接做，不用先出计划：验证真实构建、源码修改后的重建、失败后重试和完整日志保存'})).run;
  const done=await until(async()=>{const r=await api('/api/dimension/work/runs/'+run.id);return r.terminal&&!r.executing?r:null;},'real repeated commands',90000);
  assert.equal(done.status,'completed',JSON.stringify({status:done.status,error:done.error,errors}));assert.deepEqual(errors,[]);
  if (writeOnly) {

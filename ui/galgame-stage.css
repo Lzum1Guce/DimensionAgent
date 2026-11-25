@@ -676,7 +676,8 @@
 
 .gal-vn-gradient {
   position: relative;
-  padding: 36px 0 12px;
+  box-sizing: border-box;
+  padding: 34px clamp(20px, 4vw, 56px) 12px;
   background: linear-gradient(
     180deg,
     rgba(255, 253, 250, 0) 0%,
@@ -732,7 +733,7 @@
 }
 .gal-face-canvas {
   position: relative;
-  width: 245px;
+  width: min(245px, calc(var(--gal-face-w, 228px) * 1.08));
   aspect-ratio: 848 / 1264;
   flex-shrink: 0;
   transform-origin: 50% 0%;
@@ -795,11 +796,12 @@
 
 .gal-vn-text-area {
   position: relative;
-  width: min(880px, calc(100% - 260px));
+  width: min(880px, 100%);
   margin: 0 auto;
-  min-height: 112px;
-  max-height: 30vh;
-  padding-bottom: 28px;
+  min-height: 118px;
+  max-height: min(34vh, 270px);
+  padding-bottom: 34px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -807,7 +809,8 @@
   user-select: text;
 }
 .gal-stage.is-face-off .gal-vn-text-area {
-  width: min(940px, calc(100% - 120px));
+  width: min(940px, 100%);
+  margin: 0 auto;
 }
 .gal-vn-text-area.is-box-jolt {
   animation: galBoxJolt 0.26s cubic-bezier(0.22, 1, 0.36, 1);
@@ -835,18 +838,22 @@
 .gal-speaker-bar {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 6px;
   position: relative;
   width: fit-content;
+  max-width: 100%;
   min-width: 168px;
-  padding: 2px 34px 3px 12px;
+  padding: 3px 28px 4px 12px;
+  box-sizing: border-box;
   background: linear-gradient(90deg, rgba(226, 206, 174, 0.88) 0%, rgba(226, 206, 174, 0.52) 68%, rgba(226, 206, 174, 0) 100%);
   border-radius: 3px 0 0 3px;
 }
 .gal-speaker-name {
   font-size: 20px;
   font-weight: 800;
+  line-height: 1.32;
   color: #ffffff;
   letter-spacing: 0.06em;
   text-shadow:
@@ -859,6 +866,8 @@
 .gal-speaker-mood {
   font-size: 11px;
   font-weight: 600;
+  line-height: 1.35;
+  flex-shrink: 0;
   color: rgba(96, 70, 52, 0.9);
   background: rgba(255, 250, 242, 0.72);
   padding: 1px 7px;
@@ -870,10 +879,15 @@
 
 /* Crisp white VN subtitle text with clean dark-brown outline/shadow (readable on ANY bg) */
 .gal-dialogue-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  max-height: 20vh;
-  padding-right: 26px;
-  padding-bottom: 4px;
+  overflow-x: hidden;
+  max-height: min(23vh, 196px);
+  padding: 4px 28px 10px 4px;
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(116, 86, 62, 0.45) transparent;
 }
 .gal-dialogue-text {
   font-size: var(--gal-font-size, 21px);
@@ -1044,7 +1058,8 @@
   border: none;
   outline: none;
   background: transparent;
-  padding: 2px 0;
+  padding: 4px 4px 6px 4px;
+  box-sizing: border-box;
   font-family: inherit;
   font-size: var(--gal-font-size, 21px);
   font-weight: 700;
@@ -2409,18 +2424,23 @@ html[data-motion="off"] #galAutoBtn.is-active,
 
 /* Keep the portrait and dialogue in separate columns even on a narrow stage. */
 .gal-stage:not(.is-face-off) .gal-vn-gradient {
-  padding-left: min(260px, 30vw);
-  padding-right: clamp(12px, 3vw, 48px);
+  --gal-face-w: min(228px, 26vw);
+  --gal-face-gap: 18px;
+  --gal-face-left: max(8px, calc(50% - 563px));
+  padding-left: calc(var(--gal-face-left) + var(--gal-face-w) + var(--gal-face-gap));
+  padding-right: max(18px, calc(50% - 563px));
 }
 .gal-stage:not(.is-face-off) .gal-vn-text-area {
   width: min(100%, 880px);
+  margin: 0;
 }
 .gal-stage:not(.is-face-off) .gal-face-window {
-  left: 0;
-  width: min(244px, 28vw);
-  overflow: hidden;
+  left: var(--gal-face-left);
+  width: var(--gal-face-w);
+  overflow: visible;
+  clip-path: inset(-44px -10px 0px -10px);
 }
-.gal-stage.is-group-mode .gal-face-window { display: none; }
+.gal-stage.is-group-mode:not(.is-pixel-theater) .gal-face-window { display: none; }
 body.galgame-active .dimension-toast-host { top: 76px; bottom: auto; }
 
 .gal-jump-latest {

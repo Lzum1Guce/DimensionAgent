@@ -6,12 +6,11 @@ import {startNative} from './archive-export-api.mjs';
 const [installed, work] = process.argv.slice(2);
 assert(path.isAbsolute(installed) && path.isAbsolute(work));
 const config=JSON.parse(await readFile(path.join(installed,'native-client.json'),'utf8'));
-await mkdir(work,{recursive:true});
 const output=await mkdtemp(path.join(work,'first-start-'));
 await mkdir(path.join(output,'temp'));
 const ids='claude deepseek gemini glm gpt grok kimi qwen'.split(' ').map(name=>'ai-'+name).sort();
-const app=await startNative({label:'installed-client',executable:path.resolve(installed,config.backend),
-  ui:path.resolve(installed,config.ui),output,data:path.join(output,'clean-data')});
+const app=await startNative({label:'installed-client',executable:path.join(installed,config.backend),
+  ui:path.join(installed,config.ui),output,data:path.join(output,'clean-data')});
 try {
   const boot=await app.api('/api/dimension/bootstrap');
   assert.deepEqual(boot.bots.map(b=>b.id).sort(),ids);

@@ -1,0 +1,743 @@
+/* ==========================================================================
+   DimensionAgent 正式版 · 欧式分层像素剧院舞台样式
+   - 零 Emoji / 极简单色线性 SVG / 6 层独立透明合成 + Layer 3.5 手举木牌
+   - 完美适配全屏沉浸舞台、底部字幕区无遮挡构图与右键纯享模式
+   ========================================================================== */
+
+.pt-stage-root {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 6;
+  overflow: hidden;
+  background: #141018;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pt-stage-root[hidden] {
+  display: none !important;
+}
+
+/* 像素模式开启时，隐藏传统 2.5D 背景层、单人立绘层与群像立绘层，让 6 层像素剧院全面接管视觉 */
+.gal-stage.is-pixel-theater .gal-bg-layer,
+.gal-stage.is-pixel-theater .gal-particles,
+.gal-stage.is-pixel-theater .gal-char-anchor,
+.gal-stage.is-pixel-theater .gal-group-cast {
+  display: none !important;
+}
+
+/* 像素剧院模式下保留左下角发言角色半身立绘窗，并与底部字幕带优雅融合 */
+.gal-stage.is-pixel-theater:not(.is-face-off) .gal-face-window {
+  display: flex;
+  height: 226px;
+  overflow: visible;
+  clip-path: inset(-44px -10px 0px -10px);
+  filter: drop-shadow(0 8px 18px rgba(16, 10, 8, 0.44));
+}
+.gal-stage.is-pixel-theater:not(.is-face-off) .gal-face-window:hover {
+  filter: drop-shadow(0 10px 22px rgba(42, 26, 16, 0.56));
+}
+.gal-stage.is-pixel-theater .gal-vn-gradient {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 252, 246, 0) 0%,
+    rgba(255, 252, 246, calc(var(--gal-box-opacity) * 0.62)) 26%,
+    rgba(255, 251, 245, calc(var(--gal-box-opacity) * 0.90)) 68%,
+    rgba(255, 250, 243, calc(var(--gal-box-opacity) * 0.97)) 100%
+  );
+}
+
+/* 当像素剧院展开 4 块手举木牌命运抉择时，隐藏旧弹窗并优雅收起底部字幕区，让木牌成为全场焦点 */
+.gal-stage.is-pixel-theater .gal-story-fork-overlay {
+  display: none !important;
+}
+.gal-stage.is-pixel-theater.is-pixel-fork-open .gal-vn-bottom {
+  opacity: 0;
+  transform: translateY(28px);
+  pointer-events: none;
+  transition: opacity 0.32s ease, transform 0.32s ease;
+}
+
+/* 像素模式锐利渲染（绝不模糊发虚） */
+.pt-stage-root.mode-pixel .pt-stage-img,
+.pt-stage-root.mode-pixel .pt-actor-sprite,
+.pt-stage-root.mode-pixel .pt-choice-sign-img {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.pt-stage-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transition: opacity 0.24s ease;
+}
+
+.pt-stage-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
+/* Layer 0: 独立可换幕景背景层 */
+.pt-layer-backdrop {
+  z-index: 10;
+}
+
+.pt-backdrop-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 48%;
+  transition: opacity 0.45s ease;
+}
+
+.pt-backdrop-img.fade-out {
+  opacity: 0;
+}
+
+/* Layer 1: 舞台追光与金粉微尘 Canvas */
+.pt-layer-lights {
+  z-index: 14;
+}
+
+.pt-lights-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Layer 2: 零留空实木透视舞台地板层 */
+.pt-layer-floor {
+  z-index: 18;
+}
+
+.pt-layer-floor .pt-stage-img {
+  object-fit: fill;
+}
+
+/* 底沿 7 盏暖光黄铜脚灯微呼吸叠层 */
+.pt-footlights-glow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 14%;
+  background:
+    radial-gradient(ellipse 6.5% 85% at 7.1% 92%, rgba(255, 206, 118, 0.30), transparent 72%),
+    radial-gradient(ellipse 6.5% 85% at 21.4% 92%, rgba(255, 206, 118, 0.32), transparent 72%),
+    radial-gradient(ellipse 6.5% 85% at 35.7% 92%, rgba(255, 206, 118, 0.35), transparent 72%),
+    radial-gradient(ellipse 7.0% 90% at 50.0% 92%, rgba(255, 214, 130, 0.40), transparent 72%),
+    radial-gradient(ellipse 6.5% 85% at 64.3% 92%, rgba(255, 206, 118, 0.35), transparent 72%),
+    radial-gradient(ellipse 6.5% 85% at 78.6% 92%, rgba(255, 206, 118, 0.32), transparent 72%),
+    radial-gradient(ellipse 6.5% 85% at 92.9% 92%, rgba(255, 206, 118, 0.30), transparent 72%);
+  mix-blend-mode: screen;
+  animation: ptFootlightBreath 3.8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.gal-stage.is-motion-off .pt-footlights-glow {
+  animation: none;
+  opacity: 0.78;
+}
+
+@keyframes ptFootlightBreath {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
+
+/* 地板点击走位交互热区 */
+.pt-floor-hitbox {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  top: 56%;
+  bottom: 8%;
+  z-index: 20;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.pt-walk-ripple {
+  position: absolute;
+  width: 34px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(242, 208, 136, 0.85);
+  transform: translate(-50%, -50%) scale(0.4);
+  opacity: 0.9;
+  pointer-events: none;
+  z-index: 21;
+  animation: ptWalkRipple 0.55s ease-out forwards;
+}
+
+@keyframes ptWalkRipple {
+  to {
+    transform: translate(-50%, -50%) scale(1.7);
+    opacity: 0;
+  }
+}
+
+/* Layer 3: 舞台演员层（位于实木地板上方、大幕布后方，可从侧幕走出） */
+.pt-layer-actors {
+  z-index: 24;
+  pointer-events: none;
+}
+
+.pt-actor {
+  position: absolute;
+  left: 50%;
+  top: 70%;
+  height: clamp(190px, 34vh, 330px);
+  aspect-ratio: 1 / 1;
+  transform: translate(-50%, -96%);
+  transform-origin: 50% 96%;
+  pointer-events: auto;
+  cursor: pointer;
+  will-change: left, top, transform, filter;
+  transition: filter 0.28s ease;
+}
+
+.pt-actor.is-listening {
+  filter: brightness(0.84) saturate(0.92);
+}
+
+.pt-actor.is-speaking {
+  filter: brightness(1.04) saturate(1.04);
+}
+
+.pt-actor-shadow {
+  position: absolute;
+  left: 50%;
+  bottom: 2.0%;
+  width: 48%;
+  height: 9.5%;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, rgba(20, 9, 4, 0.62) 0%, rgba(20, 9, 4, 0.28) 56%, transparent 78%);
+  pointer-events: none;
+}
+
+.pt-actor-sprite {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background-repeat: no-repeat;
+  background-size: 1400% 100%;
+  background-position: 0% 0%;
+  transform-origin: 50% 96%;
+  filter: drop-shadow(0 3px 6px rgba(18, 8, 4, 0.36));
+  pointer-events: none;
+}
+
+/* 尚未制作像素表的角色优雅立绘同台兼容容器 */
+.pt-actor-fallback {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  transform-origin: 50% 96%;
+  pointer-events: none;
+}
+
+.pt-actor-fallback img {
+  height: 92%;
+  width: auto;
+  max-width: 96%;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 4px 10px rgba(16, 8, 4, 0.44));
+}
+
+.pt-actor-fallback.is-avatar-chip img {
+  height: 54%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 2px solid rgba(226, 186, 112, 0.72);
+  margin-bottom: 10%;
+}
+
+.pt-actor-nametag {
+  position: absolute;
+  left: 50%;
+  top: 2%;
+  transform: translateX(-50%);
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(18, 13, 22, 0.78);
+  border: 1px solid rgba(226, 186, 112, 0.34);
+  color: #f3e4c8;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.24s ease, background 0.24s ease, transform 0.24s ease;
+}
+
+.pt-actor.is-speaking .pt-actor-nametag {
+  border-color: rgba(242, 204, 128, 0.88);
+  background: rgba(54, 16, 28, 0.88);
+  color: #fff6e4;
+  box-shadow: 0 0 14px rgba(226, 186, 112, 0.36);
+}
+
+.pt-actor-action-pill {
+  color: #e2ba70;
+  font-size: 10px;
+  opacity: 0.92;
+}
+
+.gal-stage.is-ui-hidden .pt-actor-nametag {
+  opacity: 0;
+}
+
+/* Layer 4: 双侧束起丝绒大幕布与中央合拢闭幕层 */
+.pt-layer-curtains {
+  z-index: 28;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pt-curtain-piece {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
+.pt-curtain-left-closed { transform-origin: 0% 50%; }
+.pt-curtain-right-closed { transform-origin: 100% 50%; }
+.pt-curtain-left-open { transform-origin: 0% 50%; }
+.pt-curtain-right-open { transform-origin: 100% 50%; }
+
+/* Layer 5: 顶部鎏金流苏天幕檐帘层 */
+.pt-layer-valance {
+  z-index: 30;
+  pointer-events: none;
+}
+
+.pt-layer-valance .pt-stage-img {
+  object-fit: fill;
+}
+
+/* Layer 3.5 正式版挂载：命运抉择手举木牌浮层（高于底部字幕栏 26，低于顶部 HUD 36 与剧场导演台 42，绝不遮挡顶部浮层） */
+.pt-choice-host {
+  position: absolute;
+  inset: 0;
+  z-index: 34;
+  overflow: clip;
+  pointer-events: none;
+}
+
+.pt-choice-host[hidden] {
+  display: none !important;
+}
+
+/* 当顶部「剧场导演台」或任意浮窗展开时，自动优雅隐退命运提示横额，杜绝任何视觉重叠 */
+.gal-stage.is-director-deck-open .pt-fate-banner {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translate(-50%, -10px) !important;
+}
+
+.pt-choice-scrim {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 65% at 50% 72%, rgba(16, 10, 18, 0.14), rgba(12, 8, 16, 0.42));
+  opacity: 0;
+  transition: opacity 0.36s ease;
+  pointer-events: none;
+}
+
+.pt-choice-host.is-visible .pt-choice-scrim {
+  opacity: 1;
+}
+
+/* 顶部命运提示横额（居中位于鎏金顶檐下方，附极简「先收起」按钮） */
+.pt-fate-banner {
+  position: absolute;
+  top: clamp(76px, 16vh, 142px);
+  left: 50%;
+  transform: translate(-50%, -10px);
+  z-index: 2;
+  padding: 7px 14px 7px 18px;
+  border-radius: 999px;
+  background: rgba(19, 12, 22, 0.84);
+  border: 1px solid rgba(226, 186, 112, 0.5);
+  backdrop-filter: blur(10px);
+  color: #f4e2bc;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.34s ease, transform 0.34s ease;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.48);
+  max-width: min(86vw, 760px);
+}
+
+.pt-fate-banner.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+
+.pt-fate-banner-line {
+  width: 14px;
+  height: 1px;
+  background: rgba(226, 186, 112, 0.65);
+  flex-shrink: 0;
+}
+
+.pt-fate-banner-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pt-fate-collapse-btn {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(226, 186, 112, 0.42);
+  background: rgba(226, 186, 112, 0.12);
+  color: #f5dfb2;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.pt-fate-collapse-btn:hover {
+  background: rgba(226, 186, 112, 0.24);
+  border-color: #e2ba70;
+}
+
+/* 4 块手举木牌本体（100% 复刻已验收的 1/4 屏宽均布、高低错落、独立呼吸、不漏手） */
+.pt-choice-sign-btn {
+  position: absolute;
+  bottom: -16.5%;
+  width: clamp(180px, 20.4%, 340px);
+  aspect-ratio: 512 / 780;
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: 50% 96%;
+  will-change: transform, filter, opacity;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pt-choice-sign-btn.is-three-mode {
+  bottom: -23.5%;
+  width: clamp(200px, 23.6%, 370px);
+}
+
+.pt-choice-sign-btn.is-editing {
+  z-index: 64 !important;
+  cursor: default;
+}
+
+.pt-choice-sign-btn.is-disabled {
+  pointer-events: none;
+}
+
+.pt-choice-sign-img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 12px 18px rgba(10, 4, 2, 0.54));
+  transition: filter 0.22s ease;
+}
+
+.pt-choice-sign-btn:hover .pt-choice-sign-img,
+.pt-choice-sign-btn:focus-visible .pt-choice-sign-img,
+.pt-choice-sign-btn.is-editing .pt-choice-sign-img {
+  filter:
+    drop-shadow(0 14px 22px rgba(10, 4, 2, 0.64))
+    drop-shadow(0 0 14px rgba(255, 214, 126, 0.52));
+}
+
+.pt-choice-sign-btn.is-chosen .pt-choice-sign-img {
+  filter:
+    drop-shadow(0 14px 24px rgba(12, 4, 2, 0.66))
+    drop-shadow(0 0 18px rgba(255, 224, 138, 0.78));
+}
+
+.pt-choice-sign-face {
+  position: absolute;
+  top: 8.4%;
+  left: 8.6%;
+  right: 8.6%;
+  height: 34.8%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5%;
+  padding: 2% 3.5%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.pt-choice-sign-btn.is-editing .pt-choice-sign-face {
+  pointer-events: auto;
+  gap: 6%;
+}
+
+.pt-choice-sign-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(38, 14, 7, 0.84);
+  border: 1px solid rgba(255, 224, 158, 0.65);
+  color: #fff8e8;
+  font-size: clamp(9.5px, 0.8vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow:
+    0 1px 0 rgba(18, 6, 2, 0.95),
+    0 0 4px rgba(18, 6, 2, 0.7);
+  box-shadow: 0 2px 5px rgba(16, 6, 2, 0.45);
+  line-height: 1.35;
+}
+
+.pt-choice-sign-badge svg {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+}
+
+.pt-choice-sign-btn.is-custom-sign .pt-choice-sign-badge {
+  background: rgba(124, 20, 38, 0.92);
+  border-color: rgba(255, 226, 162, 0.78);
+  color: #fff8ea;
+}
+
+.pt-choice-sign-btn.is-chosen .pt-choice-sign-badge {
+  background: rgba(146, 24, 44, 0.96);
+  border-color: rgba(255, 234, 174, 0.92);
+  color: #ffffff;
+}
+
+.pt-choice-sign-title {
+  color: #ffffff;
+  font-size: clamp(12px, 1.18vw, 17px);
+  font-weight: 800;
+  line-height: 1.32;
+  letter-spacing: 0.03em;
+  -webkit-text-stroke: 3.2px #240d04;
+  paint-order: stroke fill;
+  text-shadow:
+    -1.2px -1.2px 0 #240d04,
+     1.2px -1.2px 0 #240d04,
+    -1.2px  1.2px 0 #240d04,
+     1.2px  1.2px 0 #240d04,
+     0px    2.2px 3px rgba(14, 5, 2, 0.88);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.pt-choice-sign-sub {
+  color: #fff3d6;
+  font-size: clamp(9.5px, 0.8vw, 12px);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  -webkit-text-stroke: 2.2px #260e05;
+  paint-order: stroke fill;
+  text-shadow:
+    -1px -1px 0 #260e05,
+     1px -1px 0 #260e05,
+    -1px  1px 0 #260e05,
+     1px  1px 0 #260e05,
+     0px  1.5px 2px rgba(14, 5, 2, 0.85);
+  line-height: 1.28;
+}
+
+.pt-custom-editor {
+  display: none;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.pt-choice-sign-btn.is-editing .pt-choice-idle-text {
+  display: none;
+}
+
+.pt-choice-sign-btn.is-editing .pt-custom-editor {
+  display: flex;
+}
+
+.pt-custom-input {
+  width: 96%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1.5px solid rgba(72, 28, 10, 0.65);
+  background: rgba(255, 243, 216, 0.88);
+  color: #241005;
+  font-family: inherit;
+  font-size: clamp(10.5px, 0.92vw, 13.5px);
+  font-weight: 700;
+  text-align: center;
+  outline: none;
+  box-shadow: inset 0 1px 3px rgba(64, 24, 8, 0.22);
+}
+
+.pt-custom-input:focus {
+  border-color: #7d192c;
+  background: rgba(255, 248, 232, 0.97);
+}
+
+.pt-custom-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.pt-custom-act {
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid rgba(74, 28, 14, 0.55);
+  font-family: inherit;
+  font-size: clamp(9.5px, 0.78vw, 12px);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pt-custom-submit {
+  background: #7c192b;
+  border-color: #4d0d19;
+  color: #fff3da;
+}
+
+.pt-custom-submit:hover {
+  background: #982036;
+}
+
+.pt-custom-cancel {
+  background: rgba(255, 236, 198, 0.76);
+  color: #451c0c;
+}
+
+.pt-custom-cancel:hover {
+  background: rgba(255, 244, 220, 0.96);
+}
+
+/* 本地拖拽替换幕景时的优雅鎏金遮罩 */
+.pt-drop-overlay {
+  position: absolute;
+  inset: 16px;
+  z-index: 60;
+  border-radius: 14px;
+  border: 2px dashed rgba(226, 186, 112, 0.75);
+  background: rgba(16, 12, 22, 0.72);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f6e4c1;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease;
+}
+
+.pt-drop-overlay.is-visible {
+  opacity: 1;
+}
+
+/* 像素剧院模式下，表情浮窗附加「12 套像素剧场动作」分区样式 */
+.gal-pixel-actions-wrap {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.gal-pixel-actions-wrap[hidden] {
+  display: none !important;
+}
+
+.gal-pixel-actions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: rgba(242, 212, 152, 0.92);
+  margin-bottom: 8px;
+}
+
+.gal-pixel-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.gal-pixel-act-btn {
+  padding: 6px 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(226, 186, 112, 0.24);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3e8d8;
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+
+.gal-pixel-act-btn:hover {
+  background: rgba(226, 186, 112, 0.18);
+  border-color: rgba(226, 186, 112, 0.6);
+  color: #fff5e0;
+}
+
+.gal-pixel-act-btn.is-active {
+  background: rgba(154, 34, 56, 0.72);
+  border-color: #e2ba70;
+  color: #fff6e6;
+}
+
+/* 底部链接栏像素剧院模式激活态微金亮显 */
+.gal-link-btn.is-pixel-on {
+  color: #f4d28b !important;
+  border-color: rgba(226, 186, 112, 0.55) !important;
+  background: rgba(132, 24, 42, 0.36) !important;
+}

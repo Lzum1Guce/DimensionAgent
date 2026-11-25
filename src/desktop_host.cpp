@@ -134,6 +134,20 @@ struct Client {
     ComPtr<ICoreWebView2Environment> environment;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webview;
+    struct BrowserTab {
+        std::string id;
+        ComPtr<ICoreWebView2Controller> controller;
+        ComPtr<ICoreWebView2> webview;
+        std::wstring pending_url;
+        bool creating=false, ready=false, loading=false;
+    };
+    ComPtr<ICoreWebView2Environment> browser_environment;
+    bool browser_env_creating=false;
+    std::map<std::string,std::unique_ptr<BrowserTab>> browser_tabs;
+    std::string active_browser_tab;
+    RECT browser_bounds{0,0,0,0};
+    bool browser_visible=false;
+    static constexpr std::size_t max_browser_tabs=12;
     HMODULE loader=nullptr;
     std::unique_ptr<Gdiplus::Image> splash;
     std::unique_ptr<Gdiplus::Image> wordmark;
@@ -216,7 +230,7 @@ struct Client {
             if(splash->GetLastStatus()!=Gdiplus::Ok)splash.reset();
         }
         load_prefs();
-        if(resolved_theme()=="nightink")splash.reset();
+        if(resolved_theme()=="nightink"||resolved_theme()=="codex")splash.reset();
     }
     void release_splash_surface(){
         if(splash_mem_dc){
@@ -288,6 +302,8 @@ struct Client {
         return value!=0;
     }
     std::string resolved_theme() const {
+        if(pref_theme=="codex")return "codex";
+        if(pref_theme=="codexlight")return "codexlight";
         if(pref_theme=="nightink")return "nightink";
         if(pref_theme=="warmamber")return "warmamber";
         if(pref_theme=="system")return system_light()?"paperlight":"nightink";
@@ -295,6 +311,8 @@ struct Client {
     }
     COLORREF app_color() const {
         const auto t=resolved_theme();
+        if(t=="codex")return RGB(13,14,17);
+        if(t=="codexlight")return RGB(255,255,255);
         return t=="nightink"?RGB(25,23,21):(t=="warmamber"?RGB(246,243,237):RGB(250,249,245));
     }
     void load_prefs(){
@@ -311,7 +329,7 @@ struct Client {
             const auto language=field(value,"language");
             if(language=="en"||language=="zh-CN")pref_language=language;
             const auto theme=field(value,"theme");
-            if(theme=="paperlight"||theme=="warmamber"||theme=="nightink"||theme=="system")pref_theme=theme;
+            if(theme=="paperlight"||theme=="warmamber"||theme=="nightink"||theme=="codex"||theme=="codexlight"||theme=="system")pref_theme=theme;
             if(auto found=value.find("closeToTray");found&&found->is_bool())pref_close_to_tray=found->as_bool();
             if(auto found=value.find("rememberWindowPosition");found&&found->is_bool())pref_remember_window=found->as_bool();
             if(auto found=value.find("notificationsEnabled");found&&found->is_bool())pref_notifications=found->as_bool();
@@ -355,7 +373,8 @@ struct Client {
         const bool zoomed=IsZoomed(window)!=FALSE;
         const int corner=zoomed?1:2;
         DwmSetWindowAttribute(window,33,&corner,sizeof(corner));
-        const COLORREF border=zoomed?static_cast<COLORREF>(0xFFFFFFFE):(resolved_theme()=="nightink"?RGB(63,58,51):RGB(217,211,200));
+        const auto theme=resolved_theme();
+        const COLORREF border=zoomed?static_cast<COLORREF>(0xFFFFFFFE):(theme=="codex"?RGB(38,42,52):(theme=="codexlight"?RGB(224,227,233):(theme=="nightink"?RGB(63,58,51):RGB(217,211,200))));
         DwmSetWindowAttribute(window,34,&border,sizeof(border));
         MARGINS margins=zoomed?MARGINS{0,0,0,0}:MARGINS{0,0,0,1};
         DwmExtendFrameIntoClientArea(window,&margins);
@@ -655,11 +674,381 @@ struct Client {
     }
     void stop(){
         if(quitting.exchange(true))return;
+        close_all_browser_tabs();
         KillTimer(window,1);clear_notifications();
         if(input.value){constexpr char command[]="shutdown\n";DWORD written=0;WriteFile(input.value,command,sizeof(command)-1,&written,nullptr);input.reset();}
         if(process.value&&WaitForSingleObject(process.value,10000)==WAIT_TIMEOUT){log("Backend did not stop within deadline");TerminateJobObject(job.value,1);WaitForSingleObject(process.value,2000);}
         if(reader.joinable()){CancelSynchronousIo(reader.native_handle());reader.join();}
         output.reset();process.reset();job.reset();
+    }
+    static bool is_safe_browser_url(const std::wstring& raw){
+        if(raw.empty())return false;
+        std::wstring lower=raw;
+        std::transform(lower.begin(),lower.end(),lower.begin(),[](wchar_t c){return std::towlower(c);});
+        return lower==L"about:blank"||lower.starts_with(L"http://")||lower.starts_with(L"https://");
+    }
+    bool is_main_backend_api_url(const std::wstring& raw)const{
+        if(origin.empty())return false;
+        if(raw==origin)return true;
+        if(!raw.starts_with(origin+L"/"))return false;
+        // Allow authorized local artifact preview routes (/v/<token>/), block control APIs/UI origin from untrusted browser tabs.
+        return !raw.starts_with(origin+L"/v/");
+    }
+    void post_browser_msg(const Json& payload){
+        if(!webview||quitting)return;
+        try{webview->PostWebMessageAsJson(widen(payload.dump()).c_str());}catch(...){}
+    }
+    void push_browser_tab_state(const std::string& tab_id,const std::string& error_msg=""){
+        auto it=browser_tabs.find(tab_id);
+        if(it==browser_tabs.end()||!it->second)return;
+        auto& tab=*it->second;
+        std::string url_str,title_str;
+        BOOL can_back=FALSE,can_fwd=FALSE;
+        if(tab.webview){
+            LPWSTR u=nullptr;if(SUCCEEDED(tab.webview->get_Source(&u))&&u){try{url_str=narrow(u);}catch(...){}CoTaskMemFree(u);}
+            LPWSTR t=nullptr;if(SUCCEEDED(tab.webview->get_DocumentTitle(&t))&&t){try{title_str=narrow(t);}catch(...){}CoTaskMemFree(t);}
+            tab.webview->get_CanGoBack(&can_back);
+            tab.webview->get_CanGoForward(&can_fwd);
+        }else if(!tab.pending_url.empty()){
+            try{url_str=narrow(tab.pending_url);}catch(...){}
+        }
+        Json::Object obj{
+            {"source","dimension-browser"},
+            {"action","tab-state"},
+            {"id",tab_id},
+            {"url",url_str},
+            {"title",title_str},
+            {"loading",tab.loading},
+            {"canGoBack",can_back!=FALSE},
+            {"canGoForward",can_fwd!=FALSE}
+        };
+        if(!error_msg.empty())obj["error"]=error_msg;
+        post_browser_msg(Json(std::move(obj)));
+    }
+    void sync_browser_layout(){
+        RECT client{};
+        if(!window||!GetClientRect(window,&client))return;
+        RECT r=browser_bounds;
+        r.left=std::clamp(r.left,client.left,client.right);
+        r.right=std::clamp(r.right,r.left,client.right);
+        r.top=std::clamp(r.top,client.top,client.bottom);
+        r.bottom=std::clamp(r.bottom,r.top,client.bottom);
+        const bool show_any=loaded&&browser_visible&&!IsIconic(window)&&(r.right-r.left>=16)&&(r.bottom-r.top>=16);
+        for(auto& [id,tab]:browser_tabs){
+            if(!tab||!tab->controller)continue;
+            const bool active=show_any&&(id==active_browser_tab);
+            if(active)tab->controller->put_Bounds(r);
+            tab->controller->put_IsVisible(active?TRUE:FALSE);
+        }
+    }
+    void close_browser_tab(const std::string& tab_id){
+        auto it=browser_tabs.find(tab_id);
+        if(it==browser_tabs.end())return;
+        if(it->second&&it->second->controller){
+            it->second->controller->put_IsVisible(FALSE);
+            it->second->controller->Close();
+        }
+        browser_tabs.erase(it);
+        if(active_browser_tab==tab_id)active_browser_tab.clear();
+        sync_browser_layout();
+    }
+    void close_all_browser_tabs(){
+        for(auto& [id,tab]:browser_tabs){
+            (void)id;
+            if(tab&&tab->controller){
+                tab->controller->put_IsVisible(FALSE);
+                tab->controller->Close();
+            }
+        }
+        browser_tabs.clear();
+        active_browser_tab.clear();
+        browser_visible=false;
+        browser_environment.Reset();
+    }
+    void ensure_browser_env(){
+        if(browser_environment||browser_env_creating||!loader||quitting)return;
+        using CreateEnvironment=HRESULT(STDAPICALLTYPE*)(PCWSTR,PCWSTR,ICoreWebView2EnvironmentOptions*,ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
+        const auto create=reinterpret_cast<CreateEnvironment>(GetProcAddress(loader,"CreateCoreWebView2EnvironmentWithOptions"));
+        if(!create)return;
+        browser_env_creating=true;
+        auto options=Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+        const auto language=pref_language=="en"?L"en":L"zh-CN";
+        options->put_Language(language);
+        const auto profile=config.data/L"webview-browser-profile";
+        const auto hr=create(nullptr,profile.c_str(),options.Get(),Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+            [this](HRESULT result,ICoreWebView2Environment* env)->HRESULT{
+                browser_env_creating=false;
+                if(quitting||FAILED(result)||!env){
+                    if(!quitting)log("Embedded Work browser WebView2 environment failed to initialize");
+                    return S_OK;
+                }
+                browser_environment=env;
+                std::vector<std::string> pending_ids;
+                for(const auto& [id,tab]:browser_tabs){
+                    if(tab&&!tab->ready&&!tab->creating)pending_ids.push_back(id);
+                }
+                for(const auto& id:pending_ids)create_browser_tab_controller(id);
+                return S_OK;
+            }).Get());
+        if(FAILED(hr))browser_env_creating=false;
+    }
+    void create_browser_tab_controller(const std::string& tab_id){
+        auto it=browser_tabs.find(tab_id);
+        if(it==browser_tabs.end()||!it->second||it->second->creating||it->second->ready)return;
+        if(!browser_environment){ensure_browser_env();return;}
+        it->second->creating=true;
+        const auto on_ctrl=Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+            [this,tab_id](HRESULT result,ICoreWebView2Controller* ctrl)->HRESULT{
+                if(quitting||FAILED(result)||!ctrl){
+                    if(ctrl)ctrl->Close();
+                    auto cur=browser_tabs.find(tab_id);
+                    if(cur!=browser_tabs.end()&&cur->second){
+                        cur->second->creating=false;
+                        push_browser_tab_state(tab_id,"内置浏览器标签初始化失败");
+                    }
+                    return S_OK;
+                }
+                auto cur=browser_tabs.find(tab_id);
+                if(cur==browser_tabs.end()||!cur->second){
+                    ctrl->Close();
+                    return S_OK;
+                }
+                auto& tab=*cur->second;
+                tab.creating=false;
+                tab.ready=true;
+                tab.controller=ctrl;
+                ctrl->get_CoreWebView2(&tab.webview);
+                if(!tab.webview){
+                    close_browser_tab(tab_id);
+                    return S_OK;
+                }
+                ComPtr<ICoreWebView2Settings> settings;
+                if(SUCCEEDED(tab.webview->get_Settings(&settings))&&settings){
+                    settings->put_AreDefaultContextMenusEnabled(TRUE);
+                    settings->put_IsStatusBarEnabled(FALSE);
+                    settings->put_AreDevToolsEnabled(TRUE);
+                    settings->put_IsWebMessageEnabled(FALSE);
+                    settings->put_AreHostObjectsAllowed(FALSE);
+                }
+                {
+                    ComPtr<ICoreWebView2Controller2> ctrl2;
+                    if(SUCCEEDED(tab.controller.As(&ctrl2))&&ctrl2){
+                        const auto bg=app_color();
+                        ctrl2->put_DefaultBackgroundColor(COREWEBVIEW2_COLOR{255,GetRValue(bg),GetGValue(bg),GetBValue(bg)});
+                    }
+                }
+                tab.controller->put_IsVisible(FALSE);
+                EventRegistrationToken tok{};
+                // Block untrusted external pages in Work browser tabs from calling main backend APIs.
+                tab.webview->AddWebResourceRequestedFilter(L"*",COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+                tab.webview->add_WebResourceRequested(Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                    [this](ICoreWebView2*,ICoreWebView2WebResourceRequestedEventArgs* args)->HRESULT{
+                        ComPtr<ICoreWebView2WebResourceRequest> req;
+                        if(FAILED(args->get_Request(&req))||!req)return S_OK;
+                        LPWSTR uri=nullptr;
+                        if(FAILED(req->get_Uri(&uri)))return S_OK;
+                        const std::wstring u=uri?uri:L"";CoTaskMemFree(uri);
+                        const std::wstring ws_as_http=u.starts_with(L"ws://")?(L"http"+u.substr(2)):u;
+                        if(is_main_backend_api_url(u)||is_main_backend_api_url(ws_as_http)){
+                            ComPtr<ICoreWebView2WebResourceResponse> denied;
+                            if(browser_environment&&SUCCEEDED(browser_environment->CreateWebResourceResponse(
+                                nullptr,403,L"Blocked",L"Content-Type: text/plain\r\nCache-Control: no-store",&denied))){
+                                args->put_Response(denied.Get());
+                            }
+                        }
+                        return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_NavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
+                    [this,tab_id](ICoreWebView2*,ICoreWebView2NavigationStartingEventArgs* args)->HRESULT{
+                        LPWSTR uri=nullptr;args->get_Uri(&uri);
+                        const std::wstring u=uri?uri:L"";CoTaskMemFree(uri);
+                        if(!is_safe_browser_url(u)||is_main_backend_api_url(u)){
+                            args->put_Cancel(TRUE);
+                            push_browser_tab_state(tab_id,"已拦截不受支持的链接协议或内部接口地址");
+                            return S_OK;
+                        }
+                        if(auto found=browser_tabs.find(tab_id);found!=browser_tabs.end()&&found->second){
+                            found->second->loading=true;
+                        }
+                        push_browser_tab_state(tab_id);
+                        return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_SourceChanged(Callback<ICoreWebView2SourceChangedEventHandler>(
+                    [this,tab_id](ICoreWebView2*,ICoreWebView2SourceChangedEventArgs*)->HRESULT{
+                        push_browser_tab_state(tab_id);return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_HistoryChanged(Callback<ICoreWebView2HistoryChangedEventHandler>(
+                    [this,tab_id](ICoreWebView2*,IUnknown*)->HRESULT{
+                        push_browser_tab_state(tab_id);return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_DocumentTitleChanged(Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
+                    [this,tab_id](ICoreWebView2*,IUnknown*)->HRESULT{
+                        push_browser_tab_state(tab_id);return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_NavigationCompleted(Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                    [this,tab_id](ICoreWebView2*,ICoreWebView2NavigationCompletedEventArgs* args)->HRESULT{
+                        if(auto found=browser_tabs.find(tab_id);found!=browser_tabs.end()&&found->second){
+                            found->second->loading=false;
+                        }
+                        BOOL ok=FALSE;args->get_IsSuccess(&ok);
+                        COREWEBVIEW2_WEB_ERROR_STATUS status=COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                        args->get_WebErrorStatus(&status);
+                        std::string err;
+                        if(!ok&&status!=COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED){
+                            err="页面加载未完成 (错误码 " + std::to_string(static_cast<int>(status)) + ")";
+                        }
+                        push_browser_tab_state(tab_id,err);
+                        return S_OK;
+                    }).Get(),&tok);
+                tab.webview->add_NewWindowRequested(Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                    [this](ICoreWebView2*,ICoreWebView2NewWindowRequestedEventArgs* args)->HRESULT{
+                        args->put_Handled(TRUE);
+                        LPWSTR uri=nullptr;args->get_Uri(&uri);
+                        const std::wstring u=uri?uri:L"";CoTaskMemFree(uri);
+                        if(is_safe_browser_url(u)&&!is_main_backend_api_url(u)){
+                            try{
+                                post_browser_msg(Json(Json::Object{
+                                    {"source","dimension-browser"},
+                                    {"action","new-tab-request"},
+                                    {"url",narrow(u)}
+                                }));
+                            }catch(...){}
+                        }
+                        return S_OK;
+                    }).Get(),&tok);
+                sync_browser_layout();
+                if(!tab.pending_url.empty()&&is_safe_browser_url(tab.pending_url)&&!is_main_backend_api_url(tab.pending_url)){
+                    tab.loading=true;
+                    tab.webview->Navigate(tab.pending_url.c_str());
+                }
+                push_browser_tab_state(tab_id);
+                return S_OK;
+            });
+        const auto language=pref_language=="en"?L"en":L"zh-CN";
+        ComPtr<ICoreWebView2Environment10> env10;
+        ComPtr<ICoreWebView2ControllerOptions> ctrl_opts;
+        if(SUCCEEDED(browser_environment.As(&env10))&&SUCCEEDED(env10->CreateCoreWebView2ControllerOptions(&ctrl_opts))){
+            ComPtr<ICoreWebView2ControllerOptions2> loc_opts;
+            if(SUCCEEDED(ctrl_opts.As(&loc_opts)))loc_opts->put_ScriptLocale(language);
+            env10->CreateCoreWebView2ControllerWithOptions(window,ctrl_opts.Get(),on_ctrl.Get());
+        }else{
+            browser_environment->CreateCoreWebView2Controller(window,on_ctrl.Get());
+        }
+    }
+    void capture_browser_context(const std::string& tab_id,const std::string& req_id){
+        auto it=browser_tabs.find(tab_id);
+        if(it==browser_tabs.end()||!it->second||!it->second->webview){
+            post_browser_msg(Json(Json::Object{
+                {"source","dimension-browser"},{"action","context-captured"},{"id",tab_id},{"reqId",req_id},{"ok",false}
+            }));
+            return;
+        }
+        static constexpr wchar_t kExtractScript[]=
+            L"(()=>{try{const sel=(window.getSelection?String(window.getSelection()):'').trim().slice(0,1800);"
+            L"const txt=(document.body?(document.body.innerText||''):'').replace(/\\s+/g,' ').trim().slice(0,2600);"
+            L"return {title:String(document.title||'').slice(0,240),url:String(location.href||'').slice(0,2048),selection:sel,text:txt};}"
+            L"catch(e){return {title:'',url:String(location.href||''),selection:'',text:''};}})()";
+        it->second->webview->ExecuteScript(kExtractScript,Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+            [this,tab_id,req_id](HRESULT hr,LPCWSTR result_json)->HRESULT{
+                if(quitting)return S_OK;
+                Json ctx;
+                bool ok=false;
+                if(SUCCEEDED(hr)&&result_json){
+                    try{ctx=Json::parse(narrow(result_json));ok=ctx.is_object();}catch(...){}
+                }
+                post_browser_msg(Json(Json::Object{
+                    {"source","dimension-browser"},{"action","context-captured"},
+                    {"id",tab_id},{"reqId",req_id},{"ok",ok},{"context",ok?ctx:Json::Object{}}
+                }));
+                return S_OK;
+            }).Get());
+    }
+    void handle_browser_message(const Json& data,const std::string& action){
+        if(action=="hello"||action=="ping"){
+            post_browser_msg(Json(Json::Object{{"source","dimension-browser"},{"action","ready"},{"native",true}}));
+            return;
+        }
+        if(action=="set-bounds"){
+            auto num=[&](std::string_view k)->LONG{
+                const auto v=data.find(k);
+                return (v&&v->is_number())?static_cast<LONG>(std::lround(v->as_number())):0;
+            };
+            const LONG x=num("x"),y=num("y"),w=num("width"),h=num("height");
+            const auto vis=data.find("visible");
+            browser_visible=(vis&&vis->is_bool())?vis->as_bool():false;
+            browser_bounds=RECT{x,y,x+std::max<LONG>(0,w),y+std::max<LONG>(0,h)};
+            const auto id=field(data,"id");
+            if(!id.empty())active_browser_tab=id;
+            sync_browser_layout();
+            return;
+        }
+        const auto id=field(data,"id");
+        if(id.empty()||id.size()>64)return;
+        if(action=="create"||action=="navigate"){
+            const auto raw_url=field(data,"url");
+            std::wstring wurl;
+            try{wurl=widen(raw_url);}catch(...){return;}
+            if(wurl.empty())wurl=L"about:blank";
+            if(!is_safe_browser_url(wurl)||is_main_backend_api_url(wurl)){
+                push_browser_tab_state(id,"仅支持打开 http:// 或 https:// 网页地址");
+                return;
+            }
+            auto it=browser_tabs.find(id);
+            if(it==browser_tabs.end()){
+                if(browser_tabs.size()>=max_browser_tabs){
+                    push_browser_tab_state(id,"已达同时打开网页标签上限");
+                    return;
+                }
+                auto tab=std::make_unique<BrowserTab>();
+                tab->id=id;
+                tab->pending_url=wurl;
+                browser_tabs.emplace(id,std::move(tab));
+                if(action=="create"&&data.find("activate")&&data.at("activate").is_bool()&&data.at("activate").as_bool()){
+                    active_browser_tab=id;
+                }
+                create_browser_tab_controller(id);
+            }else if(it->second){
+                it->second->pending_url=wurl;
+                if(it->second->webview){
+                    it->second->loading=true;
+                    it->second->webview->Navigate(wurl.c_str());
+                    push_browser_tab_state(id);
+                }else if(!it->second->creating){
+                    create_browser_tab_controller(id);
+                }
+            }
+            sync_browser_layout();
+            return;
+        }
+        if(action=="activate"){
+            active_browser_tab=id;
+            sync_browser_layout();
+            push_browser_tab_state(id);
+            return;
+        }
+        if(action=="close"){
+            close_browser_tab(id);
+            return;
+        }
+        auto it=browser_tabs.find(id);
+        if(it==browser_tabs.end()||!it->second||!it->second->webview)return;
+        if(action=="go-back"){it->second->webview->GoBack();return;}
+        if(action=="go-forward"){it->second->webview->GoForward();return;}
+        if(action=="reload"){it->second->webview->Reload();return;}
+        if(action=="stop"){it->second->webview->Stop();return;}
+        if(action=="open-devtools"){it->second->webview->OpenDevToolsWindow();return;}
+        if(action=="open-external"){
+            LPWSTR uri=nullptr;
+            if(SUCCEEDED(it->second->webview->get_Source(&uri))&&uri){
+                const std::wstring u(uri);CoTaskMemFree(uri);
+                if(is_safe_browser_url(u)&&u!=L"about:blank")ShellExecuteW(window,L"open",u.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+            }
+            return;
+        }
+        if(action=="capture-context"){
+            capture_browser_context(id,field(data,"reqId"));
+            return;
+        }
     }
     bool local(const std::wstring&url)const{return url==origin||url.starts_with(origin+L"/");}
     bool frame_local(const std::wstring& url) const {
@@ -675,6 +1064,10 @@ struct Client {
         try{
             auto data=Json::parse(narrow(raw?raw:L""));CoTaskMemFree(raw);raw=nullptr;
             const auto from=field(data,"source"),action=field(data,"action");
+            if(from=="dimension-browser"){
+                handle_browser_message(data,action);
+                return;
+            }
             if(from=="dimension-preview"){
                 const auto id=field(data,"id");if(id.empty()||id.size()>128)return;
                 if(action=="open"){
@@ -703,7 +1096,7 @@ struct Client {
                     const auto language=field(row,"language");
                     if(language=="en"||language=="zh-CN")pref_language=language;
                     const auto theme=field(row,"theme");
-                    if(theme=="paperlight"||theme=="warmamber"||theme=="nightink"||theme=="system")pref_theme=theme;
+                    if(theme=="paperlight"||theme=="warmamber"||theme=="nightink"||theme=="codex"||theme=="codexlight"||theme=="system")pref_theme=theme;
                     if(auto found=row.find("closeToTray");found&&found->is_bool())pref_close_to_tray=found->as_bool();
                     if(auto found=row.find("rememberWindowPosition");found&&found->is_bool())pref_remember_window=found->as_bool();
                     if(auto found=row.find("notificationsEnabled");found&&found->is_bool())pref_notifications=found->as_bool();
@@ -927,13 +1320,15 @@ struct Client {
             return;
         }
         const auto theme=resolved_theme();
-        const bool dark=(theme=="nightink");
+        const bool is_codex=(theme=="codex");
+        const bool is_codex_light=(theme=="codexlight");
+        const bool dark=(theme=="nightink"||is_codex);
         const bool warm=(theme=="warmamber");
-        const BYTE ac_r=dark?224:(warm?198:217);
-        const BYTE ac_g=dark?131:(warm?122:119);
-        const BYTE ac_b=dark?100:(warm?60:87);
-        const BYTE ink_r=dark?243:44,ink_g=dark?238:41,ink_b=dark?230:37;
-        const BYTE sub_r=dark?166:124,sub_g=dark?158:117,sub_b=dark?147:107;
+        const BYTE ac_r=is_codex?96:(is_codex_light?37:(dark?224:(warm?198:217)));
+        const BYTE ac_g=is_codex?165:(is_codex_light?99:(dark?131:(warm?122:119)));
+        const BYTE ac_b=is_codex?250:(is_codex_light?235:(dark?100:(warm?60:87)));
+        const BYTE ink_r=is_codex?243:(is_codex_light?13:(dark?243:44)),ink_g=is_codex?244:(is_codex_light?14:(dark?238:41)),ink_b=is_codex?246:(is_codex_light?17:(dark?230:37));
+        const BYTE sub_r=is_codex?156:(is_codex_light?82:(dark?166:124)),sub_g=is_codex?163:(is_codex_light?88:(dark?158:117)),sub_b=is_codex?175:(is_codex_light?102:(dark?147:107));
 
         const UINT raw_dpi=GetDpiForWindow(window);
         const float dpi=raw_dpi>=72?static_cast<float>(raw_dpi)/96.0f:1.0f;
@@ -1124,11 +1519,15 @@ struct Client {
         case WM_PAINT:self->paint();return 0;
         case WM_SIZE:{
             if(self->controller){RECT r{};GetClientRect(hwnd,&r);self->controller->put_Bounds(r);self->controller->put_IsVisible(self->loaded&&wparam!=SIZE_MINIMIZED);}
+            self->sync_browser_layout();
             self->apply_frame();self->notify_state();
             if(wparam==SIZE_MAXIMIZED||wparam==SIZE_RESTORED)self->save_placement();
             return 0;}
         case WM_EXITSIZEMOVE:self->save_placement();return 0;
-        case WM_MOVE:if(self->controller)self->controller->NotifyParentWindowPositionChanged();return 0;
+        case WM_MOVE:{
+            if(self->controller)self->controller->NotifyParentWindowPositionChanged();
+            for(auto& [id,tab]:self->browser_tabs){(void)id;if(tab&&tab->controller)tab->controller->NotifyParentWindowPositionChanged();}
+            return 0;}
         case WM_DPICHANGED:{auto r=reinterpret_cast<RECT*>(lparam);SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
         case WM_GETMINMAXINFO:{
             auto info=reinterpret_cast<MINMAXINFO*>(lparam);info->ptMinTrackSize={820,540};

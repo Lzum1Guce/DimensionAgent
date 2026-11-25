@@ -16,9 +16,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="author" content="Lzum1Guce">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-jAPAn397pWS8nX+MUSC/9Zvn8RCGK25Q434wTiivLug=' 'sha256-UUEwS7kV043i9hTDV0D3M5CnW1XNtbdSyln8Pgb9T8c='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* https:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* wss://127.0.0.1:* ws://localhost:* wss://localhost:* http://127.0.0.1:* http://localhost:*; frame-src 'self' blob: data: http://127.0.0.1:* http://localhost:* https://localhost:*; object-src 'none'; base-uri 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-iqGEqPm4YsySO4/6Dq0aNqLIOujInGWq84sxTwu9A/Y=' 'sha256-UUEwS7kV043i9hTDV0D3M5CnW1XNtbdSyln8Pgb9T8c='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* https:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws://127.0.0.1:* wss://127.0.0.1:* ws://localhost:* wss://localhost:* http://127.0.0.1:* http://localhost:*; frame-src 'self' blob: data: http://127.0.0.1:* http://localhost:* https://localhost:*; object-src 'none'; base-uri 'self';">
   <title>维度 Agent</title>
-  <script src="/dimension-ui/boot-guard.js?v=280f92f1ba"></script>
+  <script src="/dimension-ui/boot-guard.js?v=212d56e5b5"></script>
   <style id="bootSplashInlineStyle">
     :root, html[data-theme="paperlight"] {
       --boot-bg: #FAF9F5;
@@ -40,6 +40,20 @@
       --boot-gold: #E8B578;
       --boot-ink: #F3EEE6;
       --boot-sub: #A69E93;
+    }
+    html[data-theme="codex"] {
+      --boot-bg: #0D0E11;
+      --boot-accent: #60A5FA;
+      --boot-gold: #94A3B8;
+      --boot-ink: #F3F4F6;
+      --boot-sub: #9CA3AF;
+    }
+    html[data-theme="codexlight"] {
+      --boot-bg: #FFFFFF;
+      --boot-accent: #2563EB;
+      --boot-gold: #94A3B8;
+      --boot-ink: #0D0E11;
+      --boot-sub: #525866;
     }
     .boot-curtain {
       position: fixed;
@@ -92,7 +106,8 @@
       );
       animation: bootHaloBreathe 4.6s ease-in-out infinite;
     }
-    html[data-theme="nightink"] .boot-halo {
+    html[data-theme="nightink"] .boot-halo,
+    html[data-theme="codex"] .boot-halo {
       background: radial-gradient(
         ellipse closest-side at 50% 50%,
         color-mix(in srgb, var(--boot-accent) 26%, transparent) 0%,
@@ -151,6 +166,10 @@
     html[data-theme="nightink"] .boot-wordmark-img {
       filter: invert(0.94) sepia(0.08) saturate(0.35) hue-rotate(345deg);
       opacity: 0.94;
+    }
+    html[data-theme="codex"] .boot-wordmark-img {
+      filter: invert(0.96) brightness(1.06) contrast(1.06);
+      opacity: 0.95;
     }
     .boot-ciallo {
       align-self: flex-end;
@@ -278,7 +297,8 @@
     }
     .boot-curtain.is-error .boot-ring-comet { animation-duration: 12s; }
     .boot-curtain.is-error .boot-status-text { color: #c0503a; white-space: normal; text-align: center; max-width: min(80vw, 460px); }
-    html[data-theme="nightink"] .boot-curtain.is-error .boot-status-text { color: #ef8a72; }
+    html[data-theme="nightink"] .boot-curtain.is-error .boot-status-text,
+    html[data-theme="codex"] .boot-curtain.is-error .boot-status-text { color: #f87171; }
     .boot-error-detail {
       max-width: min(80vw, 460px);
       font: 12px/1.5 "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
@@ -321,31 +341,37 @@
       transition: transform 0.56s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.56s ease;
     }
   </style>
-  <link rel="stylesheet" href="/dimension-ui/styles.css?v=c0c4b0c314">
-  <link rel="stylesheet" href="/dimension-ui/design-polish.css?v=90079f17ff">
-  <link rel="stylesheet" href="/dimension-ui/dimension-bot.css?v=0e877ae648">
+  <link rel="stylesheet" href="/dimension-ui/styles.css?v=df889dcba9">
+  <link rel="stylesheet" href="/dimension-ui/design-polish.css?v=8f2e94abb1">
+  <link rel="stylesheet" href="/dimension-ui/dimension-bot.css?v=a2748300e1">
   <link rel="stylesheet" href="/dimension-ui/panels-p1.css?v=c1c974c7d7">
-  <link rel="stylesheet" href="/dimension-ui/p1-polish.css?v=e20b527fb9">
-  <link rel="stylesheet" href="/dimension-ui/motion-fx.css?v=f3fa2c622d">
+  <link rel="stylesheet" href="/dimension-ui/p1-polish.css?v=3a247bbb8e">
+  <link rel="stylesheet" href="/dimension-ui/motion-fx.css?v=3e0dbd2d45">
+  <link rel="stylesheet" href="/dimension-ui/codex-theme.css?v=49fc51b5e5">
+  <link rel="stylesheet" href="/dimension-ui/playground-ui.css?v=0799a36543">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/app-bridge.css?v=204a7dec61">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/conversation-archive.css?v=eab6626294">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/message-actions.css?v=343d002d3b">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/group-invite.css?v=19fbc3ab90">
-  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/work-task-panel.css?v=e48ebeb178">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/work-task-panel.css?v=56c16ac38f">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/context-usage.css?v=7f5fa6c027">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/task-templates.css?v=7f07b9a6a1">
   <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/experience.css?v=4048616a21">
-  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/galgame-stage.css?v=7493578a7b">
-  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/story-theater-v3.css?v=066d1dfa57">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/galgame-stage.css?v=0742ab47d9">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/pixel-theater-stage.css?v=70556d7558">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/story-theater-v3.css?v=38ffb9bf14">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/cli-reception-modal.css?v=511d354955">
+  <link rel="stylesheet" media="print" data-defer-css="1" href="/dimension-ui/model-canvas.css?v=b9518cc484">
   <link rel="icon" type="image/png" href="/dimension-ui/dimensionagent-icon.png?v=e6a9f59f5a">
   <script type="importmap">
   {
     "imports": {
       "/dimension-ui/anime-fx.js": "/dimension-ui/anime-fx.js?v=c8fd2a8b9b",
       "/dimension-ui/app-bridge-ui.js": "/dimension-ui/app-bridge-ui.js?v=529af72e51",
-      "/dimension-ui/app.js": "/dimension-ui/app.js?v=678f4d6bc4",
+      "/dimension-ui/app.js": "/dimension-ui/app.js?v=92e19eddae",
       "/dimension-ui/galgame-bgm.js": "/dimension-ui/galgame-bgm.js?v=e8bac075e3",
-      "/dimension-ui/galgame-stage.js": "/dimension-ui/galgame-stage.js?v=0f2c48ca31",
+      "/dimension-ui/galgame-stage.js": "/dimension-ui/galgame-stage.js?v=5155d42e56",
+      "/dimension-ui/pixel-theater-stage.js": "/dimension-ui/pixel-theater-stage.js?v=0e6f7e1db7",
       "/dimension-ui/galgame-voice.js": "/dimension-ui/galgame-voice.js?v=b3c6eb8265",
       "/dimension-ui/story-theater-v3.js": "/dimension-ui/story-theater-v3.js?v=766a860e86",
       "/dimension-ui/archived-work-ui.js": "/dimension-ui/archived-work-ui.js?v=3f725c27d5",
@@ -355,7 +381,10 @@
       "/dimension-ui/bot-archive-ui.js": "/dimension-ui/bot-archive-ui.js?v=4983188757",
       "/dimension-ui/capability-status-ui.js": "/dimension-ui/capability-status-ui.js?v=01ec82441a",
       "/dimension-ui/change-diff-ui.js": "/dimension-ui/change-diff-ui.js?v=4d5c0950c6",
-      "/dimension-ui/client-settings-ui.js": "/dimension-ui/client-settings-ui.js?v=0531fcd899",
+      "/dimension-ui/client-settings-ui.js": "/dimension-ui/client-settings-ui.js?v=a18289f7c1",
+      "/dimension-ui/cli-reception-modal.js": "/dimension-ui/cli-reception-modal.js?v=c34151652e",
+      "/dimension-ui/cli-sandbox-settings-ui.js": "/dimension-ui/cli-sandbox-settings-ui.js?v=aec56e5bf2",
+      "/dimension-ui/network-proxy-ui.js": "/dimension-ui/network-proxy-ui.js?v=b0b76d90ff",
       "/dimension-ui/context-limits-ui.js": "/dimension-ui/context-limits-ui.js?v=602bbb887a",
       "/dimension-ui/context-usage-ui.js": "/dimension-ui/context-usage-ui.js?v=4a39e5a3df",
       "/dimension-ui/conversation-archive-ui.js": "/dimension-ui/conversation-archive-ui.js?v=76f5053cc0",
@@ -367,15 +396,17 @@
       "/dimension-ui/group-relay-fx.js": "/dimension-ui/group-relay-fx.js?v=0b6bb8cc76",
       "/dimension-ui/group-roster.js": "/dimension-ui/group-roster.js?v=e819430a6b",
       "/dimension-ui/group-stream-state.js": "/dimension-ui/group-stream-state.js?v=c889cecb59",
-      "/dimension-ui/group-work-ui.js": "/dimension-ui/group-work-ui.js?v=472699599b",
-      "/dimension-ui/linux-desktop-ui.js": "/dimension-ui/linux-desktop-ui.js?v=fc65e76ba2",
+      "/dimension-ui/group-work-ui.js": "/dimension-ui/group-work-ui.js?v=9d8ad98c28",
+      "/dimension-ui/linux-desktop-ui.js": "/dimension-ui/linux-desktop-ui.js?v=8e3a00aa54",
       "/dimension-ui/living-memory-ui.js": "/dimension-ui/living-memory-ui.js?v=7f84d82de9",
       "/dimension-ui/markdown-lite.js": "/dimension-ui/markdown-lite.js?v=96b8d2d755",
       "/dimension-ui/message-context-ui.js": "/dimension-ui/message-context-ui.js?v=f0cb1d2f0d",
+      "/dimension-ui/model-canvas-ui.js": "/dimension-ui/model-canvas-ui.js?v=b403cb0734",
       "/dimension-ui/notification-inbox-ui.js": "/dimension-ui/notification-inbox-ui.js?v=8a2334bbd7",
       "/dimension-ui/paper-seal.js": "/dimension-ui/paper-seal.js?v=b052b68715",
+      "/dimension-ui/playground-ui.js": "/dimension-ui/playground-ui.js?v=1bd59f382d",
       "/dimension-ui/plugin-market-ui.js": "/dimension-ui/plugin-market-ui.js?v=3c7278501f",
-      "/dimension-ui/proactive-reminders-ui.js": "/dimension-ui/proactive-reminders-ui.js?v=6fa68353bc",
+      "/dimension-ui/proactive-reminders-ui.js": "/dimension-ui/proactive-reminders-ui.js?v=fcd8850fab",
       "/dimension-ui/shared-capabilities-ui.js": "/dimension-ui/shared-capabilities-ui.js?v=0822906ac5",
       "/dimension-ui/sidebar-state-ui.js": "/dimension-ui/sidebar-state-ui.js?v=8292c84421",
       "/dimension-ui/skill-learning-ui.js": "/dimension-ui/skill-learning-ui.js?v=f9ef02bea1",
@@ -385,13 +416,13 @@
       "/dimension-ui/thought-stream.js": "/dimension-ui/thought-stream.js?v=8db870e4e9",
       "/dimension-ui/transcript-scroll.js": "/dimension-ui/transcript-scroll.js?v=9188ca7c1c",
       "/dimension-ui/ui-icons.js": "/dimension-ui/ui-icons.js?v=c2915e91d0",
-      "/dimension-ui/work-artifacts-dock.js": "/dimension-ui/work-artifacts-dock.js?v=eb9eba0911",
-      "/dimension-ui/work-cli-picker.js": "/dimension-ui/work-cli-picker.js?v=7ce75c10a5",
+      "/dimension-ui/work-artifacts-dock.js": "/dimension-ui/work-artifacts-dock.js?v=cde090abf8",
+      "/dimension-ui/work-cli-picker.js": "/dimension-ui/work-cli-picker.js?v=d8155f1f3f",
       "/dimension-ui/work-github-ui.js": "/dimension-ui/work-github-ui.js?v=9dee8626f1",
-      "/dimension-ui/work-model-ui.js": "/dimension-ui/work-model-ui.js?v=19a3a4dd94",
+      "/dimension-ui/work-model-ui.js": "/dimension-ui/work-model-ui.js?v=485b8d2616",
       "/dimension-ui/work-rollup-stream.js": "/dimension-ui/work-rollup-stream.js?v=ddb6421a66",
       "/dimension-ui/work-roster-tree.js": "/dimension-ui/work-roster-tree.js?v=3273e92c6d",
-      "/dimension-ui/work-session-ui.js": "/dimension-ui/work-session-ui.js?v=72a3b4ddac",
+      "/dimension-ui/work-session-ui.js": "/dimension-ui/work-session-ui.js?v=be9aa30da2",
       "/dimension-ui/work-task-groups.js": "/dimension-ui/work-task-groups.js?v=628c216002"
     }
   }
@@ -505,7 +536,7 @@
       <div class="sidebar-resizer" id="sidebarResizer" aria-hidden="true"></div>
       <div class="sidebar-head">
         <div class="sidebar-toolbar">
-          <div class="mode-seg-pill" id="modeSegPill" role="group" aria-label="对话与工作模式切换">
+          <div class="mode-seg-pill" id="modeSegPill" role="group" aria-label="闲谈、工坊与游乐场模式切换">
             <button type="button" class="mode-seg-tab is-active" data-shell-target="chat" title="切换到日常闲谈与茶会（Ctrl+Shift+M）">
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.75A1.5 1.5 0 0 1 4 2.25h8a1.5 1.5 0 0 1 1.5 1.5v5.5a1.5 1.5 0 0 1-1.5 1.5H6.4L3.25 13.5v-2.75H4a1.5 1.5 0 0 1-1.5-1.5v-5.5Z"/></svg>
               <span>闲谈</span>
@@ -514,29 +545,36 @@
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.25" y="4.25" width="11.5" height="8.5" rx="1.5"/><path d="M5.5 4.25v-1a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1"/><path d="M2.25 8.25h11.5"/></svg>
               <span>工坊</span>
             </button>
+            <button type="button" class="mode-seg-tab" data-shell-target="playground" title="切换到游乐场 · 外部游戏伴玩库">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="4.25" width="12.5" height="7.75" rx="3.2"/><path d="M5.5 6.8v2.6M4.2 8.1h2.6"/><circle cx="10.4" cy="7.4" r="0.65" fill="currentColor" stroke="none"/><circle cx="11.9" cy="8.8" r="0.65" fill="currentColor" stroke="none"/></svg>
+              <span>游乐场</span>
+            </button>
             <button type="button" class="mode-switch mode-switch-sr" id="modeSwitch" aria-label="切换模式，当前：Chat" title="切换 Chat / Work（Ctrl+Shift+M）" tabindex="-1">Chat</button>
           </div>
-          <div class="sidebar-icon-row">
-            <button type="button" class="sidebar-icon-btn" id="openTarotGalleryBtn" aria-label="命运牌库" title="命运牌库 · 3D 全息大阿卡纳展柜">
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
-                <path d="M8 1.8 9.55 6.45 14.2 8 9.55 9.55 8 14.2 6.45 9.55 1.8 8 6.45 6.45 8 1.8Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
-              </svg>
-            </button>
-            <button type="button" class="sidebar-icon-btn" id="searchBotBtn" aria-label="筛选伙伴与茶会" title="筛选伙伴与茶会（只筛选左侧列表）" aria-expanded="false" aria-controls="sidebarSearch">
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
-                <path d="M2.75 4h10.5M4.75 8h6.5M6.75 12h2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button type="button" class="sidebar-icon-btn" id="newBotBtn" aria-label="新建" title="新建：邂逅新伙伴 / 缔结茶会（群聊）" aria-haspopup="menu" aria-expanded="false" aria-controls="createMenu">
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
-                <path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-            </button>
-            <button type="button" class="sidebar-icon-btn" id="sidebarCollapseBtn" aria-label="收起侧栏" title="收起侧栏">
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
-                <path d="M10 3.75 5.75 8 10 12.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
+          <div class="sidebar-actions-bar">
+            <span class="sidebar-mode-caption" id="sidebarModeCaption">伙伴与茶会</span>
+            <div class="sidebar-icon-row">
+              <button type="button" class="sidebar-icon-btn" id="openTarotGalleryBtn" aria-label="命运牌库" title="命运牌库 · 3D 全息大阿卡纳展柜">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                  <path d="M8 1.8 9.55 6.45 14.2 8 9.55 9.55 8 14.2 6.45 9.55 1.8 8 6.45 6.45 8 1.8Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <button type="button" class="sidebar-icon-btn" id="searchBotBtn" aria-label="筛选伙伴与茶会" title="筛选伙伴与茶会（只筛选左侧列表）" aria-expanded="false" aria-controls="sidebarSearch">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                  <path d="M2.75 4h10.5M4.75 8h6.5M6.75 12h2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <button type="button" class="sidebar-icon-btn" id="newBotBtn" aria-label="新建" title="新建：邂逅新伙伴 / 缔结茶会（群聊）" aria-haspopup="menu" aria-expanded="false" aria-controls="createMenu">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                  <path d="M8 3.5V12.5M3.5 8H12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <button type="button" class="sidebar-icon-btn" id="sidebarCollapseBtn" aria-label="收起侧栏" title="收起侧栏">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+                  <path d="M10 3.75 5.75 8 10 12.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div class="sidebar-search" id="sidebarSearch" hidden>
@@ -550,6 +588,7 @@
       </div>
 
       <div class="sidebar-roster" id="sidebarRoster">
+        <div class="pg-sidebar-host" id="playgroundSidebarHost" hidden></div>
         <div class="work-roster-host" id="workRosterHost" hidden></div>
         <section class="group-section" id="groupSection" aria-label="组群">
           <h2 class="group-section-title">茶会与结社</h2>
@@ -595,6 +634,12 @@
 
     <div class="workspace" id="workspace">
     <div class="main-shell">
+      <button type="button" class="sidebar-icon-btn pg-floating-expand" id="pgSidebarExpandBtn" aria-label="展开侧栏" title="展开左侧游戏库">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
+          <path d="M6 3.75 10.25 8 6 12.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <section class="pg-stage-host" id="playgroundStageHost" hidden aria-label="游乐场"></section>
       <div class="chat-top-fade" id="chatTopFade" aria-hidden="true"></div>
       <header class="topbar has-chrome-balance" id="chatTopbar">
         <button type="button" class="sidebar-icon-btn sidebar-expand-btn" id="sidebarExpandBtn" hidden aria-label="打开侧栏" title="展开左侧栏">
@@ -647,7 +692,6 @@
           </div>
         </div>
         <section class="gal-stage" id="galStage" hidden aria-label="Galgame 剧场舞台"></section>
-        <section id="websiteInputCard" class="website-input-card" aria-label="网站私密输入卡" hidden></section>
         <form class="composer" id="composer">
           <button type="button" class="transcript-jump-pill" id="transcriptJumpBtn" hidden aria-live="polite">
             <span class="transcript-jump-arrow" aria-hidden="true">↓</span>
@@ -699,12 +743,19 @@
                     </svg>
                     <span class="work-cwd-path" id="workCwdPath">隔离沙盒</span>
                   </button>
-                  <button type="button" class="work-cwd-pick is-desktop-pill" id="linuxDesktopBtn" hidden title="打开 Linux 隔离桌面">
+                  <button type="button" class="work-cwd-pick is-desktop-pill" id="linuxDesktopBtn" hidden title="在右侧工作区打开 Linux 隔离桌面">
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <rect x="2" y="2.75" width="12" height="8.25" rx="1.4"/>
                       <path d="M5.5 13.5h5M8 11v2.5"/>
                     </svg>
                     <span>桌面</span>
+                  </button>
+                  <button type="button" class="work-cwd-pick is-browser-pill" id="workBrowserBtn" hidden title="展开或收起右侧内置浏览器与工作台">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <circle cx="8" cy="8" r="5.75"/>
+                      <path d="M2.5 8h11M8 2.25c1.6 1.6 2.4 3.5 2.4 5.75S9.6 12.15 8 13.75c-1.6-1.6-2.4-3.5-2.4-5.75S6.4 3.85 8 2.25Z"/>
+                    </svg>
+                    <span>浏览器</span>
                   </button>
                 </div>
 
@@ -725,7 +776,6 @@
                     <path d="m12.2 11.6 1.8 1.8"/>
                   </svg>
                 </button>
-                <button type="button" class="work-attach-btn composer-icon-btn" id="chatWebsiteBtn" title="沙盒网站助手：输入关键词搜索，或用 /浏览 打开公网 HTTPS 网址" aria-label="网站助手" hidden>网页</button>
                 <button type="button" class="work-attach-btn composer-icon-btn" id="chatImageBtn" title="发送图片（支持 Ctrl+V 直接粘贴截图）" aria-label="发送图片">
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect x="2.25" y="3" width="11.5" height="10" rx="1.8"/>
@@ -908,7 +958,7 @@
         </button>
       </nav>
     </aside>
-    <aside class="work-dock" id="workDock" hidden aria-label="成果预览与思路透视"></aside>
+    <aside class="work-dock" id="workDock" hidden aria-label="工坊内置浏览器、成果预览与桌面工作区"></aside>
     </div>
 
     <div class="create-menu" id="createMenu" hidden role="menu" aria-label="新建">
@@ -1013,6 +1063,8 @@
       <button type="button" class="cs-nav-item" data-cs-pane="notifications">通知</button>
       <button type="button" class="cs-nav-item" data-cs-pane="group">群聊</button>
       <button type="button" class="cs-nav-item" data-cs-pane="context">上下文</button>
+      <button type="button" class="cs-nav-item" data-cs-pane="cli-sandbox">工坊 CLI 与沙盒</button>
+      <button type="button" class="cs-nav-item" data-cs-pane="network-proxy">网络代理</button>
     </aside>
     <div class="cs-body">
       <header class="cs-head">
@@ -1028,6 +1080,8 @@
           <button type="button" class="cs-theme-card" data-theme="paperlight" aria-pressed="true"><span class="cs-theme-preview is-claude-light"></span><span>浅瓷 · 珊瑚</span></button>
           <button type="button" class="cs-theme-card" data-theme="warmamber" aria-pressed="false"><span class="cs-theme-preview is-paper"></span><span>暖卷 · 琥珀</span></button>
           <button type="button" class="cs-theme-card" data-theme="nightink" aria-pressed="false"><span class="cs-theme-preview is-night"></span><span>夜墨 · 赤陶</span></button>
+          <button type="button" class="cs-theme-card" data-theme="codex" aria-pressed="false"><span class="cs-theme-preview is-codex"></span><span>Codex · 石墨</span></button>
+          <button type="button" class="cs-theme-card" data-theme="codexlight" aria-pressed="false"><span class="cs-theme-preview is-codex-light"></span><span>Codex · 纯白</span></button>
         </div>
         <label class="cs-check"><input type="checkbox" id="csThemeSystem"> 跟随系统深浅色自动切换</label>
         <div class="cs-motion" role="radiogroup" aria-labelledby="csMotionLabel">
@@ -1076,6 +1130,12 @@
       </section>
       <section class="cs-pane" data-cs-pane="context" hidden>
         <div id="csContextHost"></div>
+      </section>
+      <section class="cs-pane" data-cs-pane="cli-sandbox" hidden>
+        <div id="csCliSandboxHost"></div>
+      </section>
+      <section class="cs-pane" data-cs-pane="network-proxy" hidden>
+        <div id="csNetworkProxyHost"></div>
       </section>
     </div>
   </div>
@@ -1162,6 +1222,6 @@
   </dialog>
 
   <script defer src="/dimension-ui/tarot-holo.js?v=b81e64df53"></script>
-  <script id="dimensionAppEntry" type="module" src="/dimension-ui/app.js?v=678f4d6bc4"></script>
+  <script id="dimensionAppEntry" type="module" src="/dimension-ui/app.js?v=92e19eddae"></script>
 </body>
 </html>

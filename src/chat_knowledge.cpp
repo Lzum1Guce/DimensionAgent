@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "dimension/chat_knowledge.hpp"
 #include "dimension/atomic_file.hpp"
+#include "dimension/network_proxy.hpp"
 
 #include <windows.h>
 #include <winhttp.h>
@@ -182,11 +183,8 @@ HttpGetResult winhttp_get(const std::string& url, int timeout_ms, std::stop_toke
     const INTERNET_PORT port = comps.nPort ? comps.nPort : (is_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT);
 
     const int eff_timeout = std::clamp(timeout_ms, 800, 8000);
-    WinHttpHandle session(WinHttpOpen(
+    WinHttpHandle session(open_configured_winhttp_session(
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) DimensionAgent/0.7",
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-        WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS,
         0));
     if (!session) {
         res.error = "winhttp_open_failed";

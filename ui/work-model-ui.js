@@ -13,6 +13,7 @@ export function bindWorkModels({ api }) {
     <div class="wm-tiers"></div><p>未指定时沿用成员模型。请求失败或连续验证失败时，只在已配置的更高档位内升级，每次任务最多两次。已启动的任务使用开始时的路线配置。</p>
     <fieldset><legend>群聊派单可选模型池</legend>
     <p>可混选 Work API 和本机 CLI 模型。CLI 使用自己的登录配置执行，账号权限以实际调用为准。留空时沿用难度档位。</p>
+    <label>分配偏好 <select name="routingPreference"><option value="balanced">均衡</option><option value="economy">省费用</option><option value="quality">质量优先</option></select></label>
     <div class="wm-pool"></div>
     <details><summary>手动添加 CLI 型号</summary><p>目录缺少型号时，填入该 CLI 接受的模型 ID。</p>
     <select name="nativeEngine" aria-label="本机 CLI"></select>
@@ -33,9 +34,15 @@ export function bindWorkModels({ api }) {
   const lock = () => { for (const input of form.querySelectorAll('input,select,button')) input.disabled = busy || !loaded;
     dialog.querySelector('.wm-refresh').disabled = busy; };
   const poolList = dialog.querySelector('.wm-pool');
-  const selectedPool = () => Array.from(poolList.querySelectorAll('input:checked'), input => {
+  const selectedPool = () => Array.from(poolList.querySelectorAll('input.wm-choice:checked'), input => {
     const [engineId, providerId, model] = JSON.parse(input.value);
-    return engineId ? { engineId, providerId, model, ...(input.dataset.custom ? {custom:true} : {}) } : { providerId, model };
+    const row = input.closest('.wm-entry');
+    const specialties = [...row.querySelectorAll('[data-specialty]:checked')].map(box => box.value);
+    const costTier = row.querySelector('.wm-cost').value;
+    return { ...(engineId ? {engineId} : {}), providerId, model, ...(input.dataset.custom ? {custom:true} : {}),
+      ...(specialties.length ? {specialties} : {}), ...(costTier !== 'unknown' ? {costTier} : {}),
+      ...(row.querySelector('.wm-manual').checked ? {manualOnly:true} : {}) };
+
   });
   let lastData;
   const paint = data => {
@@ -43,7 +50,8 @@ export function bindWorkModels({ api }) {
     form.elements.nativeEngine.replaceChildren(...(data.cliEngines || []).map(engine => new Option(engine.name, engine.id)));
     models = data.models || []; form.elements.enabled.checked = data.settings.enabled;
     const saved = data.settings.pool || [];
-    const checked = new Set(saved.map(poolKey));
+    form.elements.routingPreference.value = data.settings.routingPreference || "balanced";
+    const checked = new Map(saved.map(item => [poolKey(item), item]));
     const options = new Map([...saved, ...models, ...(data.cliModels || [])].map(model => [poolKey(model), model]));
     poolList.replaceChildren();
     const groups = new Map();
@@ -62,11 +70,31 @@ export function bindWorkModels({ api }) {
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.value = value;
-      if (model.custom) input.dataset.custom = "true";
+      const profile = checked.get(value) || model;
+      input.className = 'wm-choice';
+      if (profile.custom) input.dataset.custom = "true";
       input.checked = checked.has(value);
       label.append(input, document.createTextNode(model.label || `${model.providerId} / ${model.model}`));
       const row = document.createElement('div');
-      row.append(label);
+      row.className = 'wm-entry';
+      const profileBox = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = '专长与使用偏好';
+      profileBox.append(summary);
+      const checkbox = (title, value) => {
+        const label = document.createElement('label'), box = document.createElement('input');
+        box.type = 'checkbox'; box.checked = value; label.append(box, title); profileBox.append(label); return box;
+      };
+      for (const [id, title] of Object.entries({planning:'规划',frontend:'前端',backend:'后端',debugging:'调试',review:'审查',testing:'测试',routine:'例行任务'})) {
+        const box = checkbox(title, profile.specialties?.includes(id)); box.dataset.specialty = id; box.value = id;
+      }
+      const cost = document.createElement('select'); cost.className = 'wm-cost';
+      cost.setAttribute('aria-label','相对成本档');
+      for (const [v,t] of Object.entries({unknown:'费用未知',low:'低成本',standard:'标准成本',high:'高成本'})) cost.add(new Option(t,v));
+      cost.value = profile.costTier || 'unknown'; profileBox.append(cost);
+      checkbox('仅手动选择', profile.manualOnly).className = 'wm-manual';
+      profileBox.hidden = !input.checked; input.onchange = () => { profileBox.hidden = !input.checked; };
+      row.append(label, profileBox);
       groups.get(group).append(row);
     }
     for (const [id] of tiers) {
@@ -78,7 +106,7 @@ export function bindWorkModels({ api }) {
     }
   };
   const draftSettings = () => ({
-      enabled: form.elements.enabled.checked, pool: selectedPool(),
+      enabled: form.elements.enabled.checked, routingPreference: form.elements.routingPreference.value, pool: selectedPool(),
       routes: Object.fromEntries(tiers.map(([id]) => {
         const value = form.elements[id].value;
         if (!value) return [id, null];
@@ -128,7 +156,7 @@ export function bindWorkModels({ api }) {
     }
     const ticket = ++version; busy = true; lock(); status.textContent = '正在保存…';
     try {
-      const data = await api('/api/dimension/work-models', { method: 'PUT', body: JSON.stringify({ enabled: form.elements.enabled.checked, routes, pool: selectedPool() }) });
+      const data = await api('/api/dimension/work-models', { method: 'PUT', body: JSON.stringify({ ...draftSettings(), routes }) });
       if (ticket !== version || !dialog.open) return;
       paint(data); status.textContent = '已保存，后续群任务按此分配模型。';
     } catch (error) { if (ticket === version) status.textContent = error.message; }

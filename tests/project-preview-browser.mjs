@@ -62,6 +62,9 @@ try{
  assert.notEqual(new URL(html.previewUrl).origin,app.origin);const record=await api(receipt.url);assert(record.ok&&record.ephemeralHome&&!record.networkAccess);
  pass('Work approval executes a real Linux Node build and finishes from real artifact checksums and receipt');
  const artifact=await app.response(html.url);assert.equal(artifact.status,200);assert(artifact.headers['content-security-policy'].includes("script-src 'none'"));
+ assert.equal(html.outputEvidence.command,'node');
+ assert.equal(html.outputEvidence.sha256,createHash('sha256').update(Buffer.from(await (await fetch(app.origin+html.url)).arrayBuffer())).digest('hex'));
+ assert.equal(receipt.outputEvidence,undefined);
  const raw=await fetch(html.previewUrl,{headers:{origin:'null','sec-fetch-site':'cross-site'}});assert.equal(raw.status,200);
  assert(raw.headers.get('content-security-policy').includes('sandbox allow-scripts'));assert.equal((await fetch(html.previewUrl,{method:'POST'})).status,403);
  pass('Interactive preview has its own loopback origin; original download stays inert and preview cannot mutate');

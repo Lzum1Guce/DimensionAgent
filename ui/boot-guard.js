@@ -5,7 +5,7 @@
     const raw = saved.theme || (window.__dimensionClientSettings && window.__dimensionClientSettings.theme) || 'paperlight';
     const resolved = raw === 'system'
       ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'nightink' : 'paperlight')
-      : (raw === 'nightink' || raw === 'warmamber' ? raw : 'paperlight');
+      : (raw === 'nightink' || raw === 'warmamber' || raw === 'codex' || raw === 'codexlight' ? raw : 'paperlight');
     document.documentElement.dataset.theme = resolved;
     const motion = saved.motion || (window.__dimensionClientSettings && window.__dimensionClientSettings.motion);
     document.documentElement.dataset.motion = (motion === 'lite' || motion === 'off') ? motion : 'full';

@@ -43,8 +43,11 @@ import { createWorkRosterTree } from './work-roster-tree.js';
 import { initAnimeFx } from './anime-fx.js';
 import { initGalgameStage, syncGalgameContext, syncGalgameStoryState, onGalgameUserMessage, onGalgameStream, onGalgameMessage, onGalgameGroupMessage, onGalgameGroupTyping, notifyGalgameNotice, stripMoodTag, getGalgameCgSnapshot, setGalgameBackgroundUrl } from './galgame-stage.js';
 import { createStoryTheaterV3Controller, STORY_TEMPLATES, extractInnerVoice, rollFateDice, v3Icon } from './story-theater-v3.js';
+import { createPlaygroundController } from './playground-ui.js';
+import { openCliReceptionModal, isCliSelection, formatCliSelectionLabel, cliGearSvg, cliTerminalSvg } from './cli-reception-modal.js';
 
 let syncChatImageDraftFn = () => {};
+let playgroundUi = null;
 
 const groupStreams = createGroupStreams();
 const remoteChatActive = new Set();
@@ -213,6 +216,8 @@ window.__dimensionPrompt = opts => openTopLayerDialog(
 ).then(res => (res.confirmed ? res.value : null));
 
 let workRosterTree = null;
+let linuxDesktopApi = null;
+let ensureLinuxDesktopFn = null;
 
 const workDock = createWorkArtifactsDock({
   host: $('workDock'),
@@ -221,11 +226,61 @@ const workDock = createWorkArtifactsDock({
   onCheckpointRestored: runId => workSession?.reloadArtifacts?.(runId),
   onManualRefresh: runId => workSession?.reloadArtifacts?.(runId),
   onPickProjectCwd: () => pickWorkCwd(),
+  onOpenDesktopEmbed: async (container, opts = {}) => {
+    if (!ensureLinuxDesktopFn) return;
+    const mod = await ensureLinuxDesktopFn();
+    linuxDesktopApi = mod;
+    await mod?.attachEmbedded?.(container, opts);
+  },
+  onDetachDesktopEmbed: () => {
+    linuxDesktopApi?.detachEmbedded?.();
+  },
+  onQuoteBrowserContext: ctx => {
+    const input = $('composerInput');
+    if (!input || !ctx?.url) return;
+    const title = String(ctx.title || '').trim();
+    const sel = String(ctx.selection || '').trim();
+    const snippet = sel || String(ctx.text || '').trim().slice(0, 800);
+    const lines = [
+      `[参考网页] ${title ? `${title} - ` : ''}${ctx.url}`,
+      snippet ? `> ${snippet.replace(/\n+/g, ' ')}` : '',
+    ].filter(Boolean);
+    const block = lines.join('\n');
+    const prev = input.value.trim();
+    input.value = prev ? `${prev}\n\n${block}\n` : `${block}\n`;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    toast(sel ? '已引用网页链接与选中内容到输入框' : '已引用当前网页上下文到输入框');
+  },
+  onVisibilityChange: open => {
+    const b = $('workBrowserBtn');
+    if (b) {
+      b.classList.toggle('is-active', Boolean(open));
+      b.setAttribute('aria-pressed', open ? 'true' : 'false');
+    }
+  },
   onLayoutChange: () => {
     if (workDock?.isOpen() && isDrawerOpen()) openDrawer(false);
     syncWindowChrome();
     pulseChatColumn(260);
   },
+  getBots: () => knownBots(),
+  getProviderGroups: () => (state.providers || []).map(item => ({
+    providerId: item.name || item.id,
+    title: item.title || item.name || item.id,
+    models: providerModels(item).length ? providerModels(item) : (item.model ? [item.model] : []),
+  })).filter(g => g.providerId),
+  getActiveBotId: () => state.botId,
+  getProjectCwd: () => state.workSettings?.projectCwd || '',
+  getLatestUserInput: () => $('composerInput')?.value?.trim() || '',
+  onBotPromoted: bot => {
+    if (!bot?.id) return;
+    mergeKnownBots([bot]);
+    renderBotList();
+    if (isWorkShell()) void workRosterTree?.refresh();
+  },
+  onNotify: msg => toast(msg),
 });
 
 const sidebarActivity = createSidebarState({
@@ -871,7 +926,8 @@ function renderModels() {
   const nameEl = $('modelTriggerName');
   const menu = $('modelMenu');
   const current = currentSelection();
-  const currentLabel = current?.model || '';
+  const isCli = isCliSelection(current);
+  const currentLabel = isCli ? formatCliSelectionLabel(current) : (current?.model || '');
   if (nameEl) nameEl.textContent = currentLabel || '选择模型';
   if (trigger) {
     trigger.setAttribute('aria-label', currentLabel ? `选择模型，当前：${currentLabel}` : '选择模型');
@@ -879,13 +935,26 @@ function renderModels() {
   if (!menu) return;
   const keyIcon = `<svg class="model-menu-key-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><circle cx="5.25" cy="8" r="2.55" stroke="currentColor" stroke-width="1.5"/><path d="M7.7 8h5.35v2.15M11.15 8v2.15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const checkIcon = `<svg class="model-option-check" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false"><path d="M3.2 8.2 6.35 11.2 12.8 4.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const cliSub = isCli ? formatCliSelectionLabel(current) : '选用本机 Code CLI 模型';
+  const cliRowHtml = `
+    <div class="model-menu-cli-row${isCli ? ' is-active' : ''}">
+      <button type="button" class="model-menu-cli-main" id="modelMenuCliBtn" data-action="cli-reception">
+        ${cliTerminalSvg(16)}
+        <span class="model-menu-cli-copy">
+          <span class="model-menu-cli-title">本机 CLI 接待</span>
+          <span class="model-menu-cli-sub">${escapeHtml(cliSub)}</span>
+        </span>
+        ${isCli ? checkIcon : ''}
+      </button>
+      <button type="button" class="model-menu-cli-gear" id="modelMenuCliSettingsBtn" data-action="cli-reception-settings" title="打开本机 CLI 设置并查看可使用模型">${cliGearSvg(12)}<span>设置</span></button>
+    </div>`;
   const choices = modelChoices();
   const items = choices.map((row) => {
-    const on = current && current.providerId === row.providerId && (current.model || '') === row.model;
+    const on = !isCli && current && current.providerId === row.providerId && (current.model || '') === row.model;
     const value = `${row.providerId}\t${row.model}`;
     return `<button type="button" class="model-option${on ? ' is-active' : ''}" role="option" data-value="${escapeHtml(value)}" aria-selected="${on ? 'true' : 'false'}"><span class="model-option-name">${escapeHtml(row.label)}</span>${checkIcon}</button>`;
   }).join('');
-  menu.innerHTML = `<button type="button" class="model-menu-key" id="modelMenuKeyBtn">${keyIcon}<span class="model-menu-key-text">添加或更改密钥</span></button><div class="model-menu-sep" role="separator"></div>${items}`;
+  menu.innerHTML = `<button type="button" class="model-menu-key" id="modelMenuKeyBtn">${keyIcon}<span class="model-menu-key-text">添加或更改密钥</span></button>${cliRowHtml}<div class="model-menu-sep" role="separator"></div>${items}`;
 }
 
 function bindModelSwitch() {
@@ -899,6 +968,13 @@ function bindModelSwitch() {
     toggleModelMenu();
   });
   menu.addEventListener('click', async (event) => {
+    const cliBtn = event.target.closest('[data-action="cli-reception"], [data-action="cli-reception-settings"]');
+    if (cliBtn) {
+      event.preventDefault();
+      closeModelMenu();
+      openBotCliReceptionSettings();
+      return;
+    }
     const keyBtn = event.target.closest('.model-menu-key');
     if (keyBtn) {
       event.preventDefault();
@@ -912,8 +988,8 @@ function bindModelSwitch() {
     const selection = parseSelectionValue(option.dataset.value || '');
     const current = currentSelection();
     closeModelMenu();
-    if (!selection || (current && selection.providerId === current.providerId && (selection.model || '') === (current.model || ''))) return;
-    await switchModel(selection);
+    if (!selection || (!isCliSelection(current) && current && selection.providerId === current.providerId && (selection.model || '') === (current.model || ''))) return;
+    await switchModel(selection, { syncWorkLead: isCliSelection(current) });
   });
   document.addEventListener('pointerdown', (event) => {
     if (!isModelMenuOpen()) return;
@@ -1424,6 +1500,8 @@ function syncConversationChrome() {
   syncSendEnabled($('composerInput'), $('sendBtn'));
   contextUsageUi?.refresh();
   syncChatThinkingToggle();
+  workUi?.sync();
+  workDock?.syncNativeOverlay?.();
   renderStoryStageBar();
   renderGroupDrawer({ loadJobs: isDrawerVisiblyOpen() }).catch(() => {});
 }
@@ -1437,66 +1515,6 @@ const closeChatSearch = () => {
   if ($('chatSearchResults')) { $('chatSearchResults').hidden = true; $('chatSearchResults').innerHTML = ''; }
   if ($('chatSearchCount')) $('chatSearchCount').textContent = '';
 };
-let websiteCard = null;
-let websiteCardTimer;
-function clearWebsiteCard(discard = true) {
-  clearTimeout(websiteCardTimer);
-  const old = websiteCard;
-  websiteCard = null;
-  const host = $('websiteInputCard');
-  if (host) {
-    host.querySelectorAll('input').forEach(input => { input.value = ''; });
-    host.replaceChildren();
-    host.hidden = true;
-  }
-  if (discard && old) void postWebsiteCard(old, { discard: true }).catch(() => {});
-}
-function postWebsiteCard(card, data) {
-  return fetch('/api/dimension/bots/' + encodeURIComponent(card.bot) + '/website-input', {
-    method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json', 'X-Dimension-Input': '1' },
-    body: JSON.stringify({ token: card.token, ...data }),
-  });
-}
-function showWebsiteCard(bot, data) {
-  clearWebsiteCard();
-  if (state.botId !== bot || isWorkShell() || state.activeGroupId || !data?.fields?.length || data.expires <= Date.now()) return;
-  const card = { bot, token: data.token };
-  websiteCard = card;
-  const host = $('websiteInputCard');
-  const el = (tag, text) => { const node = document.createElement(tag); node.textContent = text; return node; };
-  host.append(el('strong', '网站私密输入'), el('code', data.origin));
-  const inputs = [];
-  const siteFields = [];
-  for (const field of data.fields) {
-    if (field.siteOnly) { siteFields.push(field.label); continue; }
-    const label = el('label', field.label);
-    const input = document.createElement('input');
-    input.type = field.kind === 'email' ? 'email' : field.kind === 'tel' ? 'tel' : 'text';
-    input.maxLength = 512;
-    input.autocomplete = 'off';
-    input.spellcheck = false;
-    label.append(input); host.append(label); inputs.push({ ref: field.ref, input });
-  }
-  host.append(el('small', siteFields.length ? [...new Set(siteFields)].join('、') + '请在网站窗口填写。' : '填写内容直接送到上方网站。'));
-  const send = el('button', inputs.length ? '填入网站并由我继续' : '前往沙盒网站私密输入');
-  const dismiss = el('button', '取消');
-  send.type = dismiss.type = 'button';
-  host.append(send, dismiss);
-  dismiss.onclick = () => clearWebsiteCard();
-  send.onclick = async () => {
-    if (websiteCard !== card || state.botId !== bot || isWorkShell() || state.activeGroupId) return clearWebsiteCard();
-    send.disabled = dismiss.disabled = true;
-    const values = inputs.filter(x => x.input.value).map(x => ({ ref:x.ref, value:x.input.value }));
-    inputs.forEach(x => { x.input.value = ''; x.input.disabled = true; });
-    try {
-      const response = await postWebsiteCard(card, { values });
-      if (websiteCard === card) toast(response.ok ? '请在沙盒网站窗口核对并继续' : '输入卡已失效，请在网站核对');
-    } catch { if (websiteCard === card) toast('连接中断，请在网站核对填写状态'); }
-    finally { if (websiteCard === card) clearWebsiteCard(false); }
-  };
-  host.hidden = false;
-  websiteCardTimer = setTimeout(() => { if (websiteCard === card) clearWebsiteCard(); }, data.expires - Date.now());
-}
 let lastChatSearchScope;
 
 function syncChatThinkingToggle() {
@@ -1504,8 +1522,6 @@ function syncChatThinkingToggle() {
   const imgBtn = $('chatImageBtn');
   const searchBtn = $('chatSearchBtn');
   const visible = !isWorkShell() && hasConversation();
-  if (websiteCard && (!visible || state.activeGroupId || state.botId !== websiteCard.bot)) clearWebsiteCard();
-  if ($('chatWebsiteBtn')) $('chatWebsiteBtn').hidden = !visible || Boolean(state.activeGroupId);
   if (imgBtn) imgBtn.hidden = !visible;
   if (searchBtn) searchBtn.hidden = !visible;
   const scope = visible ? JSON.stringify([state.activeGroupId || '', state.activeGroupId ? '' : state.botId]) : '';
@@ -1800,7 +1816,7 @@ async function loadBootstrap() {
   // Remote model discovery must never hold up switching a conversation or connecting Chat.
   if (initial) void refreshCatalogs().then(renderModels);
   renderModels();
-  if (effective?.providerId && effective.model
+  if (!isCliSelection(effective) && effective?.providerId && effective.model
       && (effective.providerId !== state.activeProvider || effective.model !== (data.model?.model || ''))) {
     try { await applyRuntimeSelection(effective); }
     catch (err) { setModelStatus(err.message); }
@@ -1808,6 +1824,7 @@ async function loadBootstrap() {
     renderModels();
   }
   state.bootstrapped = true;
+  playgroundUi?.refreshBots();
 }
 
 function disconnectChat() {
@@ -1867,7 +1884,6 @@ function connectChat() {
     if (state.socket !== ws) return;
     setPending(false);
     state.socket = null;
-    clearWebsiteCard();
     setChatConnectionState(false);
     const delay = Math.min(15000, 1000 * 2 ** (state.wsRetry ?? 0));
     state.wsRetry = (state.wsRetry ?? 0) + 1;
@@ -1877,10 +1893,6 @@ function connectChat() {
     if (state.socket !== ws || state.botId!==connectedBot) return;
     let frame;
     try { frame = JSON.parse(event.data); } catch { return; }
-    if (frame.type === 'website.input-card') {
-      if (frame.botId === connectedBot) showWebsiteCard(connectedBot, frame.card);
-      return;
-    }
     if (frame.type === 'chat.stream') {
       if (!isWorkShell() && !state.activeGroupId && state.botId === connectedBot) {
         upsertPrivateStreamBubble(frame.phase, frame.delta || '', frame.query || '');
@@ -3827,7 +3839,7 @@ async function writeApprovalMode(mode, botId) {
 function readShellMode() {
   try {
     const raw = localStorage.getItem(SHELL_MODE_STORAGE_KEY);
-    if (raw === 'work' || raw === 'chat') return raw;
+    if (raw === 'work' || raw === 'chat' || raw === 'playground') return raw;
   } catch {}
   return 'chat';
 }
@@ -3836,8 +3848,14 @@ function isWorkShell() {
   return state.shellMode === 'work';
 }
 
+function isPlaygroundShell() {
+  return state.shellMode === 'playground';
+}
+
 function shellModeLabel(mode = state.shellMode) {
-  return mode === 'work' ? 'Work' : 'Chat';
+  if (mode === 'work') return 'Work';
+  if (mode === 'playground') return 'Playground';
+  return 'Chat';
 }
 
 function syncModeSwitch() {
@@ -3846,6 +3864,14 @@ function syncModeSwitch() {
   if (btn) {
     btn.textContent = label;
     btn.setAttribute('aria-label', `切换模式，当前：${label}`);
+  }
+  const caption = $('sidebarModeCaption');
+  if (caption) {
+    caption.textContent = state.shellMode === 'work'
+      ? '委托与共创'
+      : state.shellMode === 'playground'
+        ? '游戏伴玩库'
+        : '伙伴与茶会';
   }
   const seg = $('modeSegPill');
   if (seg) {
@@ -3859,7 +3885,7 @@ function syncModeSwitch() {
 
 function setShellMode(mode, { restoreSelection = true } = {}) {
   closeMessageMenu();
-  const next = mode === 'work' ? 'work' : 'chat', changed = next !== state.shellMode;
+  const next = mode === 'work' ? 'work' : (mode === 'playground' ? 'playground' : 'chat'), changed = next !== state.shellMode;
   if (changed) {
     state.historyAbort?.abort(); state.groupAbort?.abort(); state.groupUpdates?.close(); state.groupUpdates = null;
     state.chatHistoryTicket = (state.chatHistoryTicket || 0) + 1; state.groupLoadTicket = (state.groupLoadTicket || 0) + 1;
@@ -3870,7 +3896,21 @@ function setShellMode(mode, { restoreSelection = true } = {}) {
   }
   try { localStorage.setItem(SHELL_MODE_STORAGE_KEY, state.shellMode); } catch {}
   $('app')?.classList.toggle('is-work-shell', isWorkShell());
+  $('app')?.classList.toggle('is-playground-shell', isPlaygroundShell());
   syncStickerDraft();syncSendEnabled($('composerInput'),$('sendBtn'));
+  if (isPlaygroundShell()) {
+    closeReviewMenu();
+    closeBotContextMenu();
+    if ($('drawer') && !$('drawer').hidden) openDrawer(false);
+    workDock?.clear();
+    syncReviewEntry();
+    syncModeSwitch();
+    workUi?.sync();
+    workUi?.renderPending([]);
+    playgroundUi?.activate();
+    return;
+  }
+  playgroundUi?.deactivate();
   if (!isWorkShell()) {
     closeReviewMenu();
     workDock?.clear();
@@ -5001,17 +5041,38 @@ async function refreshCatalogs() {
   state.catalog = next;
 }
 
-async function persistConversationModel(selection, updateBotDefault) {
-  const data = await api(`/api/dimension/bots/${encodeURIComponent(state.botId)}/conversation-model`, {
+async function persistConversationModel(selection, updateBotDefault, syncWorkLead = false) {
+  const grp = currentGroup();
+  const targetBotId = (grp && (!state.botId || !grp.members?.includes(state.botId)))
+    ? (grp.ownerId || grp.members?.[0] || state.botId)
+    : state.botId;
+  const data = await api(`/api/dimension/bots/${encodeURIComponent(targetBotId)}/conversation-model`, {
     method: 'PATCH',
-    body: JSON.stringify({ modelSelection: selection, updateBotDefault: !!updateBotDefault }),
+    body: JSON.stringify({
+      modelSelection: selection,
+      updateBotDefault: !!updateBotDefault,
+      syncWorkLead: !!syncWorkLead,
+    }),
   });
   state.modelSelection = data.modelSelection || (updateBotDefault ? selection : state.modelSelection);
   state.conversationModel = data.conversationModel || null;
+  if (data.workLead && state.workSettings && typeof state.workSettings === 'object') {
+    state.workSettings = { ...state.workSettings, workLead: data.workLead };
+  }
+  if (data.bot && Array.isArray(state.bots)) {
+    const idx = state.bots.findIndex((b) => b.id === data.bot.id);
+    if (idx >= 0) state.bots[idx] = { ...state.bots[idx], ...data.bot };
+  }
   return data;
 }
 
 async function applyRuntimeSelection(selection) {
+  if (isCliSelection(selection)) {
+    state.activeProvider = selection.providerId || `cli:${selection.engineId || ''}`;
+    state.model = selection.model || selection.engineId || '';
+    state.ready = true;
+    return;
+  }
   const name = selection.providerId;
   const detail = await api(`/api/providers/${encodeURIComponent(name)}`);
   const entry = cleanEntry(detail.entry);
@@ -5028,25 +5089,85 @@ async function applyRuntimeSelection(selection) {
   state.ready = true;
 }
 
-async function switchModel(selection, { updateBotDefault } = {}) {
+async function switchModel(selection, { updateBotDefault, syncWorkLead = false } = {}) {
+  if (isCliSelection(selection)) {
+    try {
+      await persistConversationModel(selection, updateBotDefault ?? true, syncWorkLead);
+      await applyRuntimeSelection(selection);
+      renderModels();
+      workUi?.sync();
+      setModelStatus('');
+    } catch (err) {
+      setModelStatus(err.message);
+      renderModels();
+      throw err;
+    }
+    return true;
+  }
   if (!selection?.providerId || !selection.model) {
     await openKeySettings(selection?.providerId || '');
-    return;
+    return false;
   }
   const provider = state.providers.find((item) => item.name === selection.providerId);
   if (provider && !hasSecret(provider)) {
     await openKeySettings(selection.providerId);
-    return;
+    return false;
   }
+  const previous = { provider: state.activeProvider, model: state.model, ready: state.ready };
   try {
-    await persistConversationModel(selection, updateBotDefault);
     await applyRuntimeSelection(selection);
-    await loadProviders();
-    renderModels();
+    await persistConversationModel(selection, updateBotDefault, syncWorkLead);
   } catch (err) {
+    state.activeProvider = previous.provider;
+    state.model = previous.model;
+    state.ready = previous.ready;
     setModelStatus(err.message);
     renderModels();
+    return false;
   }
+  try {
+    await loadProviders();
+  } catch (err) {
+    setModelStatus(err.message);
+  }
+  renderModels();
+  workUi?.sync();
+  return true;
+}
+
+function openBotCliReceptionSettings() {
+  const grp = currentGroup();
+  const targetBotId = (grp && (!state.botId || !grp.members?.includes(state.botId)))
+    ? (grp.ownerId || grp.members?.[0] || state.botId)
+    : state.botId;
+  const targetBot = (state.bots || []).find((b) => b.id === targetBotId);
+  const targetName = targetBot?.name || state.botName || targetBotId;
+  openCliReceptionModal({
+    api,
+    botId: targetBotId,
+    botName: targetName,
+    currentSelection: currentSelection(),
+    defaultSyncWorkLead: true,
+    onSelectCli: async (cliSel, { syncWorkLead }) => {
+      await switchModel(cliSel, { updateBotDefault: true, syncWorkLead });
+      toast(`已为 ${targetName} 启用 ${formatCliSelectionLabel(cliSel)}`);
+    },
+    onSwitchToApi: async ({ syncWorkLead }) => {
+      const choices = modelChoices().filter(choice => !isCliSelection(choice));
+      if (choices.length) {
+        const first = { providerId: choices[0].providerId, model: choices[0].model };
+        if (!await switchModel(first, { updateBotDefault: true, syncWorkLead })) return false;
+        toast(`已切回维度 API：${first.model}`);
+        return true;
+      } else {
+        await openKeySettings();
+        return false;
+      }
+    },
+    onOpenSandboxSettings: () => {
+      window.__dimensionOpenClientSettings?.('cli-sandbox');
+    },
+  });
 }
 
 async function openKeys(selectedName = '') {
@@ -8332,8 +8453,34 @@ function bindUi() {
   bindWindowChrome();
   applyTheme(readClientSettings().theme);
   const clientSettings = bindClientSettings({ api });
+  window.__dimensionOpenClientSettings = (pane = '') => clientSettings.open(pane);
+  window.addEventListener('dimension:cli-sandbox-updated', async () => {
+    try {
+      const grp = currentGroup();
+      const botId = (isWorkShell() && grp) ? (grp.ownerId || grp.members?.[0] || state.botId) : state.botId;
+      if (botId) {
+        const data = await api(`/api/dimension/work/settings?botId=${encodeURIComponent(botId)}`);
+        if (data?.settings) state.workSettings = data.settings;
+      }
+      workUi?.sync();
+      workDock?.refreshCanvasLibrary?.();
+    } catch {}
+  });
   syncChromeCloseTitle();
   bindSidebarCollapse();
+  $('pgSidebarExpandBtn')?.addEventListener('click', () => $('sidebarExpandBtn')?.click());
+  playgroundUi = createPlaygroundController({
+    sidebarHost: $('playgroundSidebarHost'),
+    stageHost: $('playgroundStageHost'),
+    getBots: () => knownBots(),
+    onSetSidebarCollapsed: (collapsed) => {
+      const appEl = $('app');
+      if (!appEl) return;
+      appEl.classList.toggle('is-sidebar-collapsed', Boolean(collapsed));
+      const expand = $('sidebarExpandBtn');
+      if (expand) expand.hidden = !collapsed;
+    },
+  });
   window.__dimensionOpenClientSettings = (pane = '') => clientSettings.open(pane);
   window.addEventListener('dimension-context-limits-changed', () => {
     contextUsageUi?.refresh();
@@ -8571,17 +8718,6 @@ function bindUi() {
   };
   window.__dimensionHandleComposerImages = handleChatImageFiles;
   syncChatImageDraftFn = syncChatImageDraft;
-  $('chatWebsiteBtn')?.addEventListener('click', () => {
-    const input = $('composerInput');
-    if (!input || state.activeGroupId || isWorkShell()) return;
-    if (!/^\/(搜索|浏览)\s/.test(input.value)) {
-      const draft = input.value.trim();
-      input.value = (/^https?:\/\//i.test(draft) ? '/浏览 ' : '/搜索 ') + draft;
-    }
-    input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
   $('chatImageBtn')?.addEventListener('click', () => {
     if (!hasConversation()) return;
     $('chatImageInput')?.click();
@@ -8886,18 +9022,39 @@ function bindUi() {
 
   const ensureLinuxDesktop = createLazyModule(async () => {
     const { bindLinuxDesktop } = await import('./linux-desktop-ui.js');
-    return bindLinuxDesktop({ api, getBotId: () => state.botId, getBots: () => knownBots(), onWorkspace: (id, path) => {
-      if (id === state.botId) { state.workSettings.projectCwd = path; workUi?.sync(); }
-    } });
+    const mod = bindLinuxDesktop({
+      api,
+      getBotId: () => state.botId,
+      getBots: () => knownBots(),
+      onWorkspace: (id, path) => {
+        if (id === state.botId) { state.workSettings.projectCwd = path; workUi?.sync(); }
+      },
+      onRequestEmbed: ({ library = false, targetBotId = '' } = {}) => {
+        if (!isWorkShell() || !workDock?.openDesktop) return false;
+        workDock.openDesktop({ library, targetBotId });
+        return true;
+      },
+      onRequestCloseEmbed: () => {
+        workDock?.openOverview?.();
+      },
+    });
+    linuxDesktopApi = mod;
+    linuxDesktopReady = true;
+    return mod;
   });
+  ensureLinuxDesktopFn = ensureLinuxDesktop;
   let linuxDesktopReady = false;
   const triggerLinuxDesktop = (softwareOnly = false, targetBotId = '') => {
     if (linuxDesktopReady) return;
     void ensureLinuxDesktop().then((mod) => {
-      linuxDesktopReady = true;
-      void mod?.open?.(softwareOnly, targetBotId);
+      if (softwareOnly) void mod?.openModal?.(true, targetBotId);
+      else void mod?.open?.(false, targetBotId);
     });
   };
+  $('workBrowserBtn')?.addEventListener('click', () => {
+    if (!isWorkShell()) return;
+    workDock?.toggleBrowser?.();
+  });
   $('linuxDesktopBtn')?.addEventListener('click', () => triggerLinuxDesktop(false, ''));
   $('sharedSoftwareBtn')?.addEventListener('click', () => triggerLinuxDesktop(true, ''));
   window.addEventListener('dimension-open-desktop', (event) => {
@@ -9081,7 +9238,7 @@ function bindUi() {
           });
         }
       }
-      if (!out.length && state.activeProvider && state.model) {
+      if (!out.length && state.activeProvider && !String(state.activeProvider).startsWith('cli:') && state.model) {
         out.push({ providerId: state.activeProvider, title: state.activeProvider, models: [state.model] });
       }
       return out;
@@ -9106,7 +9263,7 @@ function bindUi() {
         messageActionNotice(`切换工位模式失败：${err.message}`);
       }
     },
-    onCliHarnessChange: async ({ cliEngine, cliModelSource, cliEngineConfig, roleProgress }) => {
+    onCliHarnessChange: async ({ cliEngine, cliModelSource, cliEngineConfig, workLead, roleProgress }) => {
       try {
         const grp = currentGroup();
         const botId = (isWorkShell() && grp) ? (grp.ownerId || grp.members?.[0] || state.botId) : state.botId;
@@ -9116,6 +9273,7 @@ function bindUi() {
         if (cliEngine) patchBody.cliEngine = cliEngine;
         if (cliModelSource) patchBody.cliModelSource = cliModelSource;
         if (cliEngineConfig) patchBody.cliEngineConfig = cliEngineConfig;
+        if (workLead && typeof workLead === 'object') patchBody.workLead = workLead;
         const data = await api('/api/dimension/work/settings', {
           method: 'PATCH',
           body: JSON.stringify(patchBody),
@@ -9127,7 +9285,8 @@ function bindUi() {
         messageActionNotice(`切换工匠配置失败：${err.message}`);
       }
     },
-    onRefreshCliAndModels: async () => {
+    onRefreshCliAndModels: async (optsArg = {}) => {
+      const silent = Boolean(optsArg && optsArg.silent);
       try {
         await loadProviders();
         await refreshCatalogs();
@@ -9138,9 +9297,9 @@ function bindUi() {
           if (data?.settings) state.workSettings = data.settings;
         }
         workUi?.sync();
-        messageActionNotice('已刷新本机工匠探测与模型目录');
+        if (!silent) messageActionNotice('已刷新本机工匠探测与模型目录');
       } catch (err) {
-        messageActionNotice(`刷新失败：${err.message}`);
+        if (!silent) messageActionNotice(`刷新失败：${err.message}`);
       }
     },
     onAddCustomModel: () => {
@@ -9150,6 +9309,12 @@ function bindUi() {
       const btn = document.getElementById('sharedWorkModelsBtn');
       if (btn) btn.click();
       else void openKeySettings();
+    },
+    onOpenCliSandboxSettings: () => {
+      window.__dimensionOpenClientSettings?.('cli-sandbox');
+    },
+    onOpenCliReceptionModal: () => {
+      openBotCliReceptionSettings();
     },
     onFiles: handleWorkFiles,
     onDecide: decideWorkPending,
@@ -9338,6 +9503,7 @@ async function start() {
       choices: modelChoices(),
     }),
     onSelectModel: (selection) => switchModel(selection),
+    onOpenCliReceptionModal: () => openBotCliReceptionSettings(),
     onUploadImages: (files) => window.__dimensionHandleComposerImages?.(files),
     getDraftMedia: () => ({
       images: [...attachmentDraft().images],
@@ -9371,7 +9537,10 @@ async function start() {
   try { await loadBootstrap(); }
   catch (err) { bootError = err; window.__bootErr = String(err?.stack || err); setModelStatus(err.message); }
   if (!bootError) {
-    if (hasConversation() && !isWorkShell()) await showBotHistory(state.botId);
+    if (isPlaygroundShell()) {
+      $('app')?.classList.add('is-playground-shell');
+      playgroundUi?.activate();
+    } else if (hasConversation() && !isWorkShell()) await showBotHistory(state.botId);
     else showConversationWelcome();
     dismissBootCurtain();
   } else {

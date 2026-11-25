@@ -7,7 +7,7 @@
 namespace dimension {
 namespace {
 int rank(std::string_view tier) {
-    if (tier == "member" || tier == "pool") return -1;
+    if (tier == "member" || tier == "pool" || tier == "cli-lead") return -1;
     if (tier == "simple") return 0;
     if (tier == "standard") return 1;
     if (tier == "complex") return 2;

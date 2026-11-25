@@ -5,8 +5,27 @@
 import { createChangeDiff } from './change-diff-ui.js';
 import { copyMessageText, messageActionNotice } from './message-context-ui.js';
 import { renderRichMessage } from './markdown-lite.js';
+import { createModelCanvasPane } from './model-canvas-ui.js';
 
 const DOCK_WIDTH_KEY = 'dimension-work-dock-width';
+const DOCK_WIDE_WIDTH_KEY = 'dimension-work-dock-wide-width';
+
+const BROWSER_QUICK_LINKS = [
+  { title: 'GitHub', url: 'https://github.com', desc: '代码仓库与 Issue' },
+  { title: 'MDN 文档', url: 'https://developer.mozilla.org/zh-CN/', desc: 'Web / JS / CSS 参考' },
+  { title: 'cppreference', url: 'https://en.cppreference.com/w/', desc: 'C++ 标准库文档' },
+  { title: 'Bing 搜索', url: 'https://cn.bing.com', desc: '资料与报错检索' },
+  { title: 'Bilibili', url: 'https://www.bilibili.com', desc: '技术视频与教程' },
+];
+
+function normalizeBrowserInput(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(s)) return `http://${s}`;
+  if (!/\s/.test(s) && /^[a-z0-9.-]+\.[a-z]{2,}(:\d+)?(\/.*)?$/i.test(s)) return `https://${s}`;
+  return `https://cn.bing.com/search?q=${encodeURIComponent(s)}`;
+}
 
 const el = (tag, className = '', text) => {
   const node = document.createElement(tag);
@@ -86,18 +105,40 @@ function wrapSvgAsHtmlDoc(svgSource) {
   </style></head><body>${svgSource}</body></html>`;
 }
 
-export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChange, onCheckpointRestored, onManualRefresh, onPickProjectCwd } = {}) {
+export function createWorkArtifactsDock({
+  api,
+  onVisibilityChange,
+  onLayoutChange,
+  onCheckpointRestored,
+  onManualRefresh,
+  onPickProjectCwd,
+  onOpenDesktopEmbed,
+  onDetachDesktopEmbed,
+  onQuoteBrowserContext,
+  getBots,
+  getProviderGroups,
+  getActiveBotId,
+  getProjectCwd,
+  getLatestUserInput,
+  onBotPromoted,
+  onNotify,
+} = {}) {
   const host = document.getElementById('workDock');
   if (!host) {
     return {
       isOpen: () => false, openArtifacts: () => {}, openOverview: () => {}, openInspector: () => {},
+      openCanvas: () => {}, openCanvasGraph: async () => {}, attachCanvasRun: async () => {},
+      ensureCanvasSaved: async () => true, setCanvasWorkLink: () => {}, refreshCanvasLibrary: () => {},
+      openDesktop: () => {}, openBrowserUrl: () => {}, openBrowserNewTab: () => {}, toggleBrowser: () => {},
       updateArtifacts: () => {}, updateOverview: () => {}, updateInspector: () => {},
       registerDevServerUrl: () => {}, openDevServerUrl: () => {},
+      syncNativeOverlay: () => {},
       close: () => {}, clear: () => {},
     };
   }
 
-  let activeTab = 'overview'; // 'overview' | 'artifacts' | 'inspector'
+  let shellTab = 'home'; // 'home' | 'canvas' | 'desktop' | `web-<n>`
+  let activeTab = 'overview'; // sub-tab inside default Home page: 'overview' | 'artifacts' | 'inspector'
   let viewMode = 'preview'; // 'preview' | 'source' | 'changes' | 'sandbox' | 'devserver'
   let viewportMode = 'desktop'; // 'desktop' | 'mobile'
   let currentRunId = '';
@@ -121,19 +162,114 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
   let manualRefreshTick = 0;
   let lastRenderedSignature = '';
 
-  // Read saved width (compact 380px default for Overview card, auto-expands nicely for Canvas)
+  // Embedded multi-tab native browser state
+  let nativeBrowserReady = false;
+  let webTabSeq = 0;
+  const webTabs = []; // { id, url, title, loading, canGoBack, canGoForward, error }
+  const pendingContextReqs = new Map();
+  let desktopAttachPending = null; // { library, targetBotId }
+
+  // Read saved widths (compact 440px default for Home page, wider 700px default for Browser / Linux Desktop tabs)
   let dockWidth = 440;
+  let wideDockWidth = 720;
   try {
     const saved = Number(localStorage.getItem(DOCK_WIDTH_KEY));
     if (Number.isFinite(saved) && saved >= 320 && saved <= 960) dockWidth = saved;
+    const savedWide = Number(localStorage.getItem(DOCK_WIDE_WIDTH_KEY));
+    if (Number.isFinite(savedWide) && savedWide >= 420 && savedWide <= 1280) wideDockWidth = savedWide;
   } catch {}
+  const isWideShellTab = () => shellTab !== 'home';
+  const currentDockWidth = () => {
+    const sidebarEl = document.querySelector('.sidebar');
+    const sidebarW = sidebarEl && !document.getElementById('app')?.classList.contains('is-sidebar-collapsed')
+      ? Math.round(sidebarEl.getBoundingClientRect().width || 248)
+      : 0;
+    const minChatW = 360;
+    const availForDock = Math.max(320, window.innerWidth - sidebarW - minChatW);
+    const maxW = Math.min(isWideShellTab() ? 1240 : 880, availForDock, Math.round(window.innerWidth * (isWideShellTab() ? 0.72 : 0.6)));
+    const target = isWideShellTab() ? wideDockWidth : dockWidth;
+    return Math.max(320, Math.min(maxW, target));
+  };
 
   host.innerHTML = '';
   const resizer = el('div', 'work-dock-resizer');
   resizer.setAttribute('aria-hidden', 'true');
+
+  // --- Left-Edge Hand-Journal Bookmark Index Strip ---
+  const bookmarkRail = el('nav', 'wb-bookmarks');
+  bookmarkRail.setAttribute('aria-label', '工坊书签标签页');
+  const browserTabsWrap = el('div', 'wb-tabs thin-scroll');
+
+  const homeShellBtn = el('button', 'wb-tab is-pinned is-tone-home is-active');
+  homeShellBtn.type = 'button';
+  homeShellBtn.dataset.shellTab = 'home';
+  homeShellBtn.title = '默认页：工坊任务概览、实时画布、Diff 与成员思路';
+  homeShellBtn.innerHTML = `<span class="wb-tab-ico" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 7.2 8 2.6l5.5 4.6v5.8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1V7.2Z"/><path d="M6.2 14V9.4h3.6V14"/></svg></span><span class="wb-tab-label">主页</span>`;
+
+  const canvasShellBtn = el('button', 'wb-tab is-pinned is-tone-canvas');
+  canvasShellBtn.type = 'button';
+  canvasShellBtn.dataset.shellTab = 'canvas';
+  canvasShellBtn.title = 'DimensionImage · 可视化自动化流程蓝图（打开软件、读取资料、获取信息、伙伴协同与打包复用）';
+  canvasShellBtn.innerHTML = `<span class="wb-tab-ico" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="2.4" width="4.2" height="3.6" rx="1"/><rect x="10" y="2.4" width="4.2" height="3.6" rx="1"/><rect x="5.9" y="10.2" width="4.2" height="3.6" rx="1"/><path d="M6 4.2h4M8 4.2v6"/></svg></span><span class="wb-tab-label">蓝图</span>`;
+
+  const desktopShellBtn = el('button', 'wb-tab is-pinned is-tone-desktop');
+  desktopShellBtn.type = 'button';
+  desktopShellBtn.dataset.shellTab = 'desktop';
+  desktopShellBtn.title = '在右侧浏览器中实时预览与接管 Linux 隔离桌面';
+  desktopShellBtn.innerHTML = `<span class="wb-tab-ico" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2.75" width="12" height="8.25" rx="1.4"/><path d="M5.5 13.5h5M8 11v2.5"/></svg></span><span class="wb-tab-label">桌面</span>`;
+
+  const dynamicTabsSlot = el('div', 'wb-dynamic-tabs');
+  browserTabsWrap.append(homeShellBtn, canvasShellBtn, desktopShellBtn, dynamicTabsSlot);
+
+  const newTabBtn = el('button', 'wb-newtab', '＋');
+  newTabBtn.type = 'button';
+  newTabBtn.title = '新建内置浏览器标签页';
+  newTabBtn.setAttribute('aria-label', '新建浏览器标签页');
+  bookmarkRail.append(browserTabsWrap, newTabBtn);
+
+  // --- Main Paper Shell (overflow:hidden inside; outer dock stays overflow:visible for hanging bookmark tabs) ---
+  const shellMain = el('div', 'wb-shell');
   const chromeSpacer = el('div', 'work-dock-keyrow');
   chromeSpacer.setAttribute('aria-hidden', 'true');
 
+  const makeCloseBtn = () => {
+    const b = el('button', 'work-dock-close', '收起');
+    b.type = 'button';
+    b.title = '收起右侧工作区 (Esc)';
+    b.setAttribute('aria-label', '收起右侧工作区');
+    return b;
+  };
+  const closeBtnHome = makeCloseBtn();
+  const closeBtnWeb = makeCloseBtn();
+  const closeBtnDesktop = makeCloseBtn();
+
+  // --- Browser Navigation & Address Bar (shown when an embedded web tab is active) ---
+  const navBar = el('div', 'wb-navbar');
+  navBar.hidden = true;
+  const navBackBtn = el('button', 'wb-nav-btn', '←');
+  navBackBtn.type = 'button'; navBackBtn.title = '后退';
+  const navFwdBtn = el('button', 'wb-nav-btn', '→');
+  navFwdBtn.type = 'button'; navFwdBtn.title = '前进';
+  const navReloadBtn = el('button', 'wb-nav-btn', '↻');
+  navReloadBtn.type = 'button'; navReloadBtn.title = '刷新';
+  const urlForm = el('form', 'wb-url-form');
+  const urlInput = el('input', 'wb-url-input');
+  urlInput.type = 'text';
+  urlInput.autocomplete = 'off';
+  urlInput.spellcheck = false;
+  urlInput.placeholder = '输入网址（如 github.com / localhost:5173）或直接搜索…';
+  urlInput.setAttribute('aria-label', '内置浏览器地址栏');
+  urlForm.append(urlInput);
+  const quoteCtxBtn = el('button', 'wb-tool-btn is-quote', '✦ 引用');
+  quoteCtxBtn.type = 'button'; quoteCtxBtn.title = '把当前网页标题、链接与选中内容发送至左侧 Work 输入框';
+  const devtoolsBtn = el('button', 'wb-tool-btn', '调试');
+  devtoolsBtn.type = 'button'; devtoolsBtn.title = '打开 Chromium 开发者工具 (DevTools)';
+  const openExtBtn = el('button', 'wb-tool-btn', '↗');
+  openExtBtn.type = 'button'; openExtBtn.title = '在系统默认浏览器中打开';
+  navBar.append(navBackBtn, navFwdBtn, navReloadBtn, urlForm, quoteCtxBtn, devtoolsBtn, openExtBtn, closeBtnWeb);
+
+  // --- Pane A: Default Home Page (Original Work Dock: Overview / Live Canvas / Inspector) ---
+  const homeShellPane = el('div', 'wb-pane wb-pane-home');
   const header = el('header', 'work-dock-head');
   const tabBar = el('div', 'work-dock-tabs');
   const ovTabBtn = el('button', 'work-dock-tab is-active', '任务概览');
@@ -144,12 +280,7 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
   inspTabBtn.type = 'button';
   inspTabBtn.hidden = true;
   tabBar.append(ovTabBtn, artTabBtn, inspTabBtn);
-
-  const closeBtn = el('button', 'work-dock-close', '收起');
-  closeBtn.type = 'button';
-  closeBtn.title = '收起右侧面板 (Esc)';
-  closeBtn.setAttribute('aria-label', '收起右侧面板');
-  header.append(tabBar, closeBtn);
+  header.append(tabBar, closeBtnHome);
 
   // 1. Overview Pane: Clean Floating Rounded Card (进度 / 产物 / 上传文件)
   const ovPane = el('div', 'work-dock-pane is-overview thin-scroll');
@@ -171,12 +302,169 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
   const inspNote = el('div', 'work-inspector-note', '只读成员思路视图 · 如需调整方向，请在左侧主窗口直接说明');
   const inspBody = el('div', 'work-inspector-host thin-scroll');
   inspPane.append(inspHero, inspNote, inspBody);
+  homeShellPane.append(header, ovPane, artPane, inspPane);
 
-  host.append(resizer, chromeSpacer, header, ovPane, artPane, inspPane);
+  // --- Pane A2: Model Canvas Blueprint & Circuit Editor Tab ---
+  const canvasShellPane = el('div', 'wb-pane wb-pane-canvas');
+  canvasShellPane.hidden = true;
+  const modelCanvasCtrl = createModelCanvasPane({
+    api,
+    host: canvasShellPane,
+    getBots,
+    getProviderGroups,
+    getActiveBotId,
+    getProjectCwd,
+    getLatestUserInput,
+    onCloseDock: () => close(),
+    onBotPromoted,
+    onNotify: onNotify || (msg => messageActionNotice(msg)),
+  });
+
+  // --- Pane B: Embedded Linux Desktop Preview Tab ---
+  const desktopShellPane = el('div', 'wb-pane wb-pane-desktop');
+  desktopShellPane.hidden = true;
+  const desktopTopbar = el('div', 'wb-desktop-topbar');
+  desktopTopbar.append(el('span', 'wb-desktop-crumb', '隔离桌面预览'), closeBtnDesktop);
+  const desktopEmbedHost = el('div', 'wb-desktop-host thin-scroll');
+  desktopShellPane.append(desktopTopbar, desktopEmbedHost);
+
+  // --- Pane C: Embedded Native WebView2 Browser Tab ---
+  const webShellPane = el('div', 'wb-pane wb-pane-web');
+  webShellPane.hidden = true;
+  const webStatusBanner = el('div', 'wb-web-status');
+  webStatusBanner.hidden = true;
+  const webStartPage = el('div', 'wb-startpage thin-scroll');
+  const webViewport = el('div', 'wb-viewport');
+  webViewport.hidden = true;
+  const webFallback = el('div', 'wb-fallback');
+  webFallback.hidden = true;
+  webViewport.append(webFallback);
+  webShellPane.append(webStatusBanner, webStartPage, webViewport);
+
+  shellMain.append(chromeSpacer, navBar, homeShellPane, canvasShellPane, desktopShellPane, webShellPane);
+  host.append(resizer, bookmarkRail, shellMain);
+
+  const postNativeBrowser = payload => {
+    try { window.chrome?.webview?.postMessage({ source: 'dimension-browser', ...payload }); return true; }
+    catch { return false; }
+  };
+
+  const getActiveWebTab = () => webTabs.find(t => t.id === shellTab) || null;
+
+  const hasBlockingOverlay = () => {
+    if (document.hidden || host.hidden) return true;
+    const appRoot = document.getElementById('app');
+    if (appRoot && !appRoot.classList.contains('is-work-shell')) return true;
+    if (document.querySelector('dialog[open]')) return true;
+    return Boolean(document.querySelector(
+      '#clientSettings:not([hidden]), #modal:not([hidden]), #globalSearchModal:not([hidden]), ' +
+      '#drawer:not([hidden]), #publicWorkbenchModal:not([hidden]), .modal:not([hidden]), ' +
+      '#modelMenu:not([hidden]), #reviewMenu:not([hidden]), .hcp-popover:not([hidden]), ' +
+      '.work-cli-popover:not([hidden]), [data-cli-picker-open="true"], .context-menu:not([hidden])'
+    ));
+  };
+
+  let boundsRaf = 0;
+  const syncNativeBrowserBoundsNow = () => {
+    boundsRaf = 0;
+    const activeWeb = getActiveWebTab();
+    const wantVisible = Boolean(
+      nativeBrowserReady &&
+      !host.hidden &&
+      activeWeb &&
+      activeWeb.url &&
+      !webViewport.hidden &&
+      !hasBlockingOverlay()
+    );
+    if (!wantVisible) {
+      if (nativeBrowserReady) {
+        postNativeBrowser({ action: 'set-bounds', id: activeWeb?.id || '', x: 0, y: 0, width: 0, height: 0, visible: false });
+      }
+      return;
+    }
+    const rect = webViewport.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(0, Math.round(rect.width * dpr));
+    const h = Math.max(0, Math.round(rect.height * dpr));
+    if (w < 16 || h < 16) {
+      postNativeBrowser({ action: 'set-bounds', id: activeWeb.id, x: 0, y: 0, width: 0, height: 0, visible: false });
+      return;
+    }
+    postNativeBrowser({
+      action: 'set-bounds',
+      id: activeWeb.id,
+      x: Math.round(rect.left * dpr),
+      y: Math.round(rect.top * dpr),
+      width: w,
+      height: h,
+      visible: true,
+    });
+  };
+  const scheduleNativeBoundsSync = () => {
+    if (!boundsRaf) boundsRaf = requestAnimationFrame(syncNativeBrowserBoundsNow);
+  };
+
+  // Listen to native WebView2 embedded browser bridge
+  if (window.chrome?.webview) {
+    window.chrome.webview.addEventListener('message', event => {
+      const msg = event?.data;
+      if (!msg || msg.source !== 'dimension-browser') return;
+      if (msg.action === 'ready' && msg.native) {
+        nativeBrowserReady = true;
+        renderActiveWebPane();
+        scheduleNativeBoundsSync();
+        return;
+      }
+      if (msg.action === 'tab-state') {
+        const tab = webTabs.find(t => t.id === msg.id);
+        if (!tab) return;
+        if (msg.url && msg.url !== 'about:blank') tab.url = msg.url;
+        if (typeof msg.title === 'string' && msg.title.trim()) tab.title = msg.title.trim();
+        tab.loading = Boolean(msg.loading);
+        tab.canGoBack = Boolean(msg.canGoBack);
+        tab.canGoForward = Boolean(msg.canGoForward);
+        tab.error = typeof msg.error === 'string' ? msg.error : '';
+        renderBrowserTabBar();
+        if (shellTab === tab.id) renderActiveWebPane({ keepUrlFocus: true });
+        return;
+      }
+      if (msg.action === 'new-tab-request' && msg.url) {
+        openBrowserTabWithUrl(msg.url);
+        return;
+      }
+      if (msg.action === 'context-captured') {
+        const resolver = pendingContextReqs.get(msg.reqId);
+        if (resolver) {
+          pendingContextReqs.delete(msg.reqId);
+          resolver(msg.ok ? msg.context : null);
+        }
+      }
+    });
+    postNativeBrowser({ action: 'hello' });
+  }
+
+  // Keep native child WebView2 cleanly aligned and hidden behind any modal/popover
+  const viewportResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => scheduleNativeBoundsSync())
+    : null;
+  viewportResizeObserver?.observe(webViewport);
+  const overlayObserver = typeof MutationObserver === 'function'
+    ? new MutationObserver(() => scheduleNativeBoundsSync())
+    : null;
+  if (overlayObserver && document.body) {
+    overlayObserver.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['hidden', 'open', 'class', 'data-cli-picker-open'],
+    });
+  }
+  document.addEventListener('visibilitychange', () => scheduleNativeBoundsSync());
 
   const notifyVisibility = open => {
     onVisibilityChange?.(open);
     onLayoutChange?.(open);
+    scheduleNativeBoundsSync();
   };
 
   const cleanupPreviewHost = () => {
@@ -194,30 +482,37 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
     const workspace = document.getElementById('workspace');
     if (!workspace) return;
     const open = !host.hidden;
-    const overlay = window.innerWidth <= 980;
+    const overlay = window.innerWidth <= 920;
+    const activeWidth = currentDockWidth();
     workspace.classList.toggle('has-work-dock', open && !overlay);
     workspace.classList.toggle('work-dock-overlay', open && overlay);
-    workspace.style.setProperty('--work-dock-width', open && !overlay ? `${Math.round(dockWidth)}px` : '0px');
+    host.classList.toggle('is-wide-tab', isWideShellTab());
+    workspace.style.setProperty('--work-dock-width', open && !overlay ? `${Math.round(activeWidth)}px` : '0px');
     notifyVisibility(open);
   };
 
-  // Drag resizer
+  // Drag resizer (remembers compact width for Home and wide width for Browser / Desktop tabs)
   resizer.addEventListener('pointerdown', event => {
     if (event.button !== 0 || window.innerWidth <= 980) return;
     event.preventDefault();
     resizer.setPointerCapture(event.pointerId);
     const startX = event.clientX;
-    const startWidth = dockWidth;
+    const wide = isWideShellTab();
+    const startWidth = currentDockWidth();
     const onMove = moveEvent => {
-      const maxW = Math.min(880, Math.round(window.innerWidth * 0.6));
-      dockWidth = Math.max(320, Math.min(maxW, startWidth + (startX - moveEvent.clientX)));
+      const maxW = Math.min(wide ? 1240 : 880, Math.round(window.innerWidth * (wide ? 0.72 : 0.6)));
+      const next = Math.max(320, Math.min(maxW, startWidth + (startX - moveEvent.clientX)));
+      if (wide) wideDockWidth = next;
+      else dockWidth = next;
       syncWidthVar();
     };
     const onUp = () => {
       resizer.removeEventListener('pointermove', onMove);
       resizer.removeEventListener('pointerup', onUp);
       resizer.removeEventListener('pointercancel', onUp);
-      try { localStorage.setItem(DOCK_WIDTH_KEY, String(Math.round(dockWidth))); } catch {}
+      try {
+        localStorage.setItem(wide ? DOCK_WIDE_WIDTH_KEY : DOCK_WIDTH_KEY, String(Math.round(wide ? wideDockWidth : dockWidth)));
+      } catch {}
     };
     resizer.addEventListener('pointermove', onMove);
     resizer.addEventListener('pointerup', onUp);
@@ -226,7 +521,326 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
 
   window.addEventListener('resize', () => {
     if (!host.hidden) syncWidthVar();
+    scheduleNativeBoundsSync();
   });
+
+  function renderBrowserTabBar() {
+    homeShellBtn.classList.toggle('is-active', shellTab === 'home');
+    canvasShellBtn.classList.toggle('is-active', shellTab === 'canvas');
+    desktopShellBtn.classList.toggle('is-active', shellTab === 'desktop');
+    dynamicTabsSlot.replaceChildren();
+    for (let i = 0; i < webTabs.length; i++) {
+      const tab = webTabs[i];
+      const toneClass = `is-tone-web-${i % 3}`;
+      const btn = el('button', `wb-tab is-web ${toneClass}${shellTab === tab.id ? ' is-active' : ''}`);
+      btn.type = 'button';
+      btn.dataset.shellTab = tab.id;
+      btn.title = tab.url ? `${tab.title || tab.url}\n${tab.url}` : '新建网页书签';
+      const dot = el('span', `wb-tab-dot${tab.loading ? ' is-loading' : ''}`);
+      const label = el('span', 'wb-tab-label', tab.title || (tab.url ? extractPortLabel(tab.url) : '新网页'));
+      const closeX = el('span', 'wb-tab-x', '×');
+      closeX.title = '撕掉此书签（关闭标签）';
+      closeX.setAttribute('role', 'button');
+      closeX.setAttribute('aria-label', `关闭 ${label.textContent}`);
+      closeX.onclick = e => {
+        e.stopPropagation();
+        closeWebTab(tab.id);
+      };
+      btn.onclick = () => setShellTab(tab.id);
+      btn.onauxclick = e => {
+        if (e.button === 1) { e.preventDefault(); closeWebTab(tab.id); }
+      };
+      btn.append(dot, label, closeX);
+      dynamicTabsSlot.append(btn);
+    }
+  }
+
+  function renderStartPage(tab) {
+    webStartPage.replaceChildren();
+    const hero = el('div', 'wb-start-hero');
+    hero.append(
+      el('h3', 'wb-start-title', '工坊内置浏览器'),
+      el('p', 'wb-start-sub', nativeBrowserReady
+        ? '独立隔离浏览内核 · 直接访问文档站、GitHub、B 站或本地 localhost 服务，随时点「✦ 引用」喂给左侧 AI 娘。'
+        : '当前运行于普通浏览器预览模式（原生客户端内将自动启用真 WebView2 内核浏览全部外网）。')
+    );
+
+    const quickForm = el('form', 'wb-start-search');
+    const qInput = el('input', 'wb-start-input');
+    qInput.type = 'text';
+    qInput.placeholder = '输入网址或搜索词，回车即达…';
+    const qGo = el('button', 'wb-start-go', '前往');
+    qGo.type = 'submit';
+    quickForm.onsubmit = e => {
+      e.preventDefault();
+      const target = normalizeBrowserInput(qInput.value);
+      if (target) navigateWebTab(tab.id, target);
+    };
+    quickForm.append(qInput, qGo);
+
+    const grid = el('div', 'wb-quick-grid');
+    if (devServerUrl) {
+      const devCard = el('button', 'wb-quick-card is-dev');
+      devCard.type = 'button';
+      devCard.append(el('strong', '', `本地开发服务 ${extractPortLabel(devServerUrl)}`), el('span', '', devServerUrl));
+      devCard.onclick = () => navigateWebTab(tab.id, devServerUrl);
+      grid.append(devCard);
+    }
+    for (const item of BROWSER_QUICK_LINKS) {
+      const card = el('button', 'wb-quick-card');
+      card.type = 'button';
+      card.append(el('strong', '', item.title), el('span', '', item.desc));
+      card.onclick = () => navigateWebTab(tab.id, item.url);
+      grid.append(card);
+    }
+
+    const deskTip = el('div', 'wb-start-foot');
+    const toDeskBtn = el('button', 'wb-quick-link-btn', '切换到「Linux 桌面」预览标签 →');
+    toDeskBtn.type = 'button';
+    toDeskBtn.onclick = () => setShellTab('desktop');
+    deskTip.append(toDeskBtn);
+
+    webStartPage.append(hero, quickForm, grid, deskTip);
+  }
+
+  function renderActiveWebPane({ keepUrlFocus = false } = {}) {
+    const tab = getActiveWebTab();
+    if (!tab) return;
+    navBackBtn.disabled = !nativeBrowserReady || !tab.canGoBack;
+    navFwdBtn.disabled = !nativeBrowserReady || !tab.canGoForward;
+    navReloadBtn.textContent = tab.loading ? '✕' : '↻';
+    navReloadBtn.title = tab.loading ? '停止加载' : '刷新';
+    quoteCtxBtn.disabled = !tab.url;
+    devtoolsBtn.hidden = !nativeBrowserReady;
+    devtoolsBtn.disabled = !tab.url;
+    openExtBtn.disabled = !tab.url;
+
+    if (!keepUrlFocus || document.activeElement !== urlInput) {
+      urlInput.value = tab.url || '';
+    }
+
+    if (tab.error) {
+      webStatusBanner.textContent = tab.error;
+      webStatusBanner.hidden = false;
+    } else {
+      webStatusBanner.hidden = true;
+    }
+
+    if (!tab.url) {
+      webStartPage.hidden = false;
+      webViewport.hidden = true;
+      webFallback.hidden = true;
+      renderStartPage(tab);
+      scheduleNativeBoundsSync();
+      return;
+    }
+
+    webStartPage.hidden = true;
+    webViewport.hidden = false;
+    if (nativeBrowserReady) {
+      webFallback.hidden = true;
+      webFallback.replaceChildren();
+      postNativeBrowser({ action: 'activate', id: tab.id });
+      scheduleNativeBoundsSync();
+    } else {
+      // Non-native fallback (e.g. headless browser smoke test or web dev mode)
+      webFallback.hidden = false;
+      const isLocalDev = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(tab.url);
+      webFallback.replaceChildren();
+      if (isLocalDev) {
+        const frame = document.createElement('iframe');
+        frame.className = 'wb-fallback-iframe';
+        frame.src = tab.url;
+        frame.title = tab.title || tab.url;
+        webFallback.append(frame);
+      } else {
+        const box = el('div', 'wb-fallback-card');
+        box.append(
+          el('strong', '', '内置浏览器需在桌面客户端中渲染外网页面'),
+          el('p', '', tab.url),
+        );
+        const ext = el('a', 'wb-start-go', '在新窗口中打开');
+        ext.href = tab.url;
+        ext.target = '_blank';
+        ext.rel = 'noopener noreferrer';
+        box.append(ext);
+        webFallback.append(box);
+      }
+    }
+  }
+
+  function navigateWebTab(tabId, rawInput) {
+    const tab = webTabs.find(t => t.id === tabId);
+    if (!tab) return;
+    const normalized = normalizeBrowserInput(rawInput);
+    if (!normalized) return;
+    tab.url = normalized;
+    tab.error = '';
+    tab.loading = nativeBrowserReady;
+    if (!tab.title || tab.title === '新标签页') {
+      tab.title = extractPortLabel(normalized);
+    }
+    if (nativeBrowserReady) {
+      postNativeBrowser({ action: 'navigate', id: tab.id, url: normalized });
+    }
+    renderBrowserTabBar();
+    if (shellTab === tab.id) renderActiveWebPane();
+  }
+
+  function openBrowserTabWithUrl(rawUrl = '') {
+    const cleanUrl = rawUrl ? normalizeBrowserInput(rawUrl) : '';
+    const id = `web-${++webTabSeq}`;
+    const tab = {
+      id,
+      url: cleanUrl,
+      title: cleanUrl ? extractPortLabel(cleanUrl) : '新标签页',
+      loading: Boolean(cleanUrl && nativeBrowserReady),
+      canGoBack: false,
+      canGoForward: false,
+      error: '',
+    };
+    webTabs.push(tab);
+    if (cleanUrl && nativeBrowserReady) {
+      postNativeBrowser({ action: 'create', id, url: cleanUrl, activate: true });
+    }
+    openShellTab(id);
+    if (!cleanUrl) {
+      setTimeout(() => { urlInput.focus(); urlInput.select(); }, 30);
+    }
+    return id;
+  }
+
+  function closeWebTab(tabId) {
+    const idx = webTabs.findIndex(t => t.id === tabId);
+    if (idx < 0) return;
+    webTabs.splice(idx, 1);
+    if (nativeBrowserReady) postNativeBrowser({ action: 'close', id: tabId });
+    if (shellTab === tabId) {
+      const next = webTabs[idx] || webTabs[idx - 1];
+      setShellTab(next ? next.id : 'home');
+    } else {
+      renderBrowserTabBar();
+    }
+  }
+
+  function setShellTab(nextShellTab) {
+    const prev = shellTab;
+    if (nextShellTab === 'desktop') {
+      shellTab = 'desktop';
+    } else if (nextShellTab === 'canvas') {
+      shellTab = 'canvas';
+    } else if (nextShellTab === 'home') {
+      shellTab = 'home';
+    } else if (webTabs.some(t => t.id === nextShellTab)) {
+      shellTab = nextShellTab;
+    } else {
+      shellTab = 'home';
+    }
+
+    if (prev === 'desktop' && shellTab !== 'desktop') {
+      onDetachDesktopEmbed?.();
+    }
+    if (prev === 'canvas' && shellTab !== 'canvas') {
+      modelCanvasCtrl.deactivate();
+    }
+    if (shellTab !== 'home') {
+      cleanupPreviewHost();
+    }
+
+    homeShellPane.hidden = shellTab !== 'home';
+    canvasShellPane.hidden = shellTab !== 'canvas';
+    desktopShellPane.hidden = shellTab !== 'desktop';
+    webShellPane.hidden = shellTab === 'home' || shellTab === 'canvas' || shellTab === 'desktop';
+    navBar.hidden = webShellPane.hidden;
+
+    renderBrowserTabBar();
+    syncWidthVar();
+
+    if (shellTab === 'home') {
+      if (activeTab === 'overview') renderOverviewPane();
+      else if (activeTab === 'artifacts') renderArtifactsPane();
+      else renderInspectorPane();
+      scheduleNativeBoundsSync();
+    } else if (shellTab === 'canvas') {
+      scheduleNativeBoundsSync();
+      void modelCanvasCtrl.activate();
+    } else if (shellTab === 'desktop') {
+      scheduleNativeBoundsSync();
+      const opts = desktopAttachPending || { library: false, targetBotId: '' };
+      desktopAttachPending = null;
+      void onOpenDesktopEmbed?.(desktopEmbedHost, opts);
+    } else {
+      renderActiveWebPane();
+    }
+  }
+
+  function openShellTab(targetShellTab) {
+    const infoDrawer = document.getElementById('drawer');
+    if (infoDrawer && !infoDrawer.hidden) {
+      document.getElementById('chromeDrawerClose')?.click();
+      infoDrawer.hidden = true;
+    }
+    host.hidden = false;
+    setShellTab(targetShellTab);
+  }
+
+  homeShellBtn.onclick = () => setShellTab('home');
+  canvasShellBtn.onclick = () => setShellTab('canvas');
+  desktopShellBtn.onclick = () => setShellTab('desktop');
+  newTabBtn.onclick = () => openBrowserTabWithUrl('');
+  navBackBtn.onclick = () => { const t = getActiveWebTab(); if (t) postNativeBrowser({ action: 'go-back', id: t.id }); };
+  navFwdBtn.onclick = () => { const t = getActiveWebTab(); if (t) postNativeBrowser({ action: 'go-forward', id: t.id }); };
+  navReloadBtn.onclick = () => {
+    const t = getActiveWebTab();
+    if (!t || !t.url) return;
+    if (nativeBrowserReady) {
+      postNativeBrowser({ action: t.loading ? 'stop' : 'reload', id: t.id });
+    } else {
+      renderActiveWebPane();
+    }
+  };
+  urlForm.onsubmit = e => {
+    e.preventDefault();
+    const t = getActiveWebTab();
+    if (!t) return;
+    navigateWebTab(t.id, urlInput.value);
+    urlInput.blur();
+  };
+  urlInput.addEventListener('focus', () => urlInput.select());
+  devtoolsBtn.onclick = () => { const t = getActiveWebTab(); if (t && t.url) postNativeBrowser({ action: 'open-devtools', id: t.id }); };
+  openExtBtn.onclick = () => {
+    const t = getActiveWebTab();
+    if (!t || !t.url) return;
+    if (nativeBrowserReady) postNativeBrowser({ action: 'open-external', id: t.id });
+    else window.open(t.url, '_blank', 'noopener,noreferrer');
+  };
+  quoteCtxBtn.onclick = async () => {
+    const t = getActiveWebTab();
+    if (!t || !t.url) return;
+    let ctx = { title: t.title || '', url: t.url, selection: '', text: '' };
+    if (nativeBrowserReady) {
+      const reqId = `ctx-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const captured = await new Promise(resolve => {
+        const timer = setTimeout(() => { pendingContextReqs.delete(reqId); resolve(null); }, 1800);
+        pendingContextReqs.set(reqId, data => { clearTimeout(timer); resolve(data); });
+        postNativeBrowser({ action: 'capture-context', id: t.id, reqId });
+      });
+      if (captured && typeof captured === 'object') {
+        ctx = {
+          title: captured.title || t.title || '',
+          url: captured.url || t.url,
+          selection: captured.selection || '',
+          text: captured.text || '',
+        };
+      }
+    }
+    if (onQuoteBrowserContext) {
+      onQuoteBrowserContext(ctx);
+    } else {
+      await copyMessageText(`${ctx.title ? `${ctx.title} ` : ''}${ctx.url}`);
+      messageActionNotice('已复制当前网页链接');
+    }
+  };
 
   const setTab = tab => {
     if (tab === 'inspector' && inspectorData) activeTab = 'inspector';
@@ -242,9 +856,11 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
     artPane.hidden = activeTab !== 'artifacts';
     inspPane.hidden = activeTab !== 'inspector';
 
-    if (activeTab === 'overview') renderOverviewPane();
-    else if (activeTab === 'artifacts') renderArtifactsPane();
-    else renderInspectorPane();
+    if (shellTab === 'home') {
+      if (activeTab === 'overview') renderOverviewPane();
+      else if (activeTab === 'artifacts') renderArtifactsPane();
+      else renderInspectorPane();
+    }
   };
 
   ovTabBtn.onclick = () => setTab('overview');
@@ -274,11 +890,16 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
   const close = ({ byUser = true } = {}) => {
     if (host.hidden) return;
     if (byUser) userDismissedRunId = currentRunId || autoRevealRunId || '__none__';
+    if (shellTab === 'desktop') onDetachDesktopEmbed?.();
+    if (shellTab === 'canvas') modelCanvasCtrl.deactivate();
     cleanupPreviewHost();
     host.hidden = true;
     syncWidthVar();
+    scheduleNativeBoundsSync();
   };
-  closeBtn.onclick = () => close();
+  closeBtnHome.onclick = () => close();
+  closeBtnWeb.onclick = () => close();
+  closeBtnDesktop.onclick = () => close();
 
   const hasOpenPopover = () => !!document.querySelector(
     '.hcp-popover:not([hidden]), .work-cli-popover:not([hidden]), [data-cli-picker-open="true"]'
@@ -1310,20 +1931,69 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
   }
 
   function openPanel(targetTab) {
-    const infoDrawer = document.getElementById('drawer');
-    if (infoDrawer && !infoDrawer.hidden) {
-      document.getElementById('chromeDrawerClose')?.click();
-      infoDrawer.hidden = true;
-    }
-    host.hidden = false;
     setTab(targetTab);
-    syncWidthVar();
+    openShellTab('home');
   }
 
   return {
     isOpen: () => !host.hidden,
     activeTab: () => activeTab,
-    inspectedMemberId: () => (!host.hidden && activeTab === 'inspector' ? inspectorData?.memberId || '' : ''),
+    shellTab: () => shellTab,
+    inspectedMemberId: () => (!host.hidden && shellTab === 'home' && activeTab === 'inspector' ? inspectorData?.memberId || '' : ''),
+    openCanvas() {
+      openShellTab('canvas');
+    },
+    async openCanvasGraph(canvasId, linkCtx = null, options = {}) {
+      openShellTab('canvas');
+      await modelCanvasCtrl.openGraph(canvasId, linkCtx, options);
+    },
+    async attachCanvasRun(canvasId, canvasRunId, { reveal = false } = {}) {
+      if (reveal || (!host.hidden && shellTab === 'canvas')) {
+        openShellTab('canvas');
+      }
+      await modelCanvasCtrl.attachRun(canvasId, canvasRunId);
+    },
+    ensureCanvasSaved(canvasId = '') {
+      return modelCanvasCtrl.ensureSaved(canvasId);
+    },
+    setCanvasWorkLink(linkCtx = null) {
+      modelCanvasCtrl.setWorkLink(linkCtx);
+    },
+    refreshCanvasLibrary() {
+      return modelCanvasCtrl.refreshLibrary();
+    },
+    openDesktop({ library = false, targetBotId = '' } = {}) {
+      desktopAttachPending = { library: Boolean(library), targetBotId: targetBotId || '' };
+      if (!host.hidden && shellTab === 'desktop') {
+        const opts = desktopAttachPending;
+        desktopAttachPending = null;
+        void onOpenDesktopEmbed?.(desktopEmbedHost, opts);
+        return;
+      }
+      openShellTab('desktop');
+    },
+    openBrowserUrl(url) {
+      const clean = normalizeBrowserInput(url);
+      if (!clean) return openBrowserTabWithUrl('');
+      const existing = webTabs.find(t => t.url === clean);
+      if (existing) {
+        openShellTab(existing.id);
+        return existing.id;
+      }
+      return openBrowserTabWithUrl(clean);
+    },
+    openBrowserNewTab() {
+      return openBrowserTabWithUrl('');
+    },
+    toggleBrowser() {
+      if (!host.hidden) {
+        close({ byUser: true });
+        return false;
+      }
+      openShellTab(shellTab || 'home');
+      return true;
+    },
+    syncNativeOverlay: () => scheduleNativeBoundsSync(),
     updateOverview({ runId = '', steps = [], uploads = [], autoReveal = false } = {}) {
       if (runId && runId !== currentRunId) {
         currentRunId = runId;
@@ -1332,7 +2002,7 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
       if (runId) resetAutoRevealFor(runId);
       progressSteps = Array.isArray(steps) ? steps : [];
       uploadedItems = Array.isArray(uploads) ? uploads : [];
-      if (!host.hidden && activeTab === 'overview') {
+      if (!host.hidden && shellTab === 'home' && activeTab === 'overview') {
         renderOverviewPane();
       } else if (autoReveal && host.hidden && progressSteps.length > 0 && window.innerWidth > 1080 && claimAutoReveal('overview')) {
         openPanel('overview');
@@ -1399,17 +2069,19 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
       const hasCanvasTarget = primary.some(f => /\.(html?|svg)$/i.test(f.name));
 
       if (!host.hidden) {
-        if (activeTab === 'overview') {
-          renderOverviewPane();
-          // Auto-jump to Live Canvas when an interactive HTML/SVG deliverable is freshly created!
-          if (autoReveal && prevPrimary === 0 && hasCanvasTarget) {
+        if (shellTab === 'home') {
+          if (activeTab === 'overview') {
+            renderOverviewPane();
+            // Auto-jump to Live Canvas when an interactive HTML/SVG deliverable is freshly created!
+            if (autoReveal && prevPrimary === 0 && hasCanvasTarget) {
+              lastRenderedSignature = nextSig;
+              viewMode = 'preview';
+              setTab('artifacts');
+            }
+          } else if (activeTab === 'artifacts' && nextSig !== lastRenderedSignature) {
             lastRenderedSignature = nextSig;
-            viewMode = 'preview';
-            setTab('artifacts');
+            renderArtifactsPane();
           }
-        } else if (activeTab === 'artifacts' && nextSig !== lastRenderedSignature) {
-          lastRenderedSignature = nextSig;
-          renderArtifactsPane();
         }
       } else if (autoReveal && host.hidden && ((prevPrimary === 0 && totalPrimary > 0) || (hasCanvasTarget && nextSig !== lastRenderedSignature)) && claimAutoReveal(hasCanvasTarget ? 'canvas' : 'artifacts')) {
         lastRenderedSignature = nextSig;
@@ -1430,13 +2102,25 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
         viewMode = 'devserver';
         openPanel('artifacts');
       } else if (!host.hidden) {
-        if (activeTab === 'overview') renderOverviewPane();
-        else if (activeTab === 'artifacts') renderArtifactsPane();
+        if (shellTab === 'home') {
+          if (activeTab === 'overview') renderOverviewPane();
+          else if (activeTab === 'artifacts') renderArtifactsPane();
+        } else {
+          const curWeb = getActiveWebTab();
+          if (curWeb && !curWeb.url) renderStartPage(curWeb);
+        }
       }
     },
     openDevServerUrl(url) {
       if (url) devServerUrl = String(url).trim();
       if (!devServerUrl) return;
+      if (nativeBrowserReady) {
+        const clean = normalizeBrowserInput(devServerUrl);
+        const existing = webTabs.find(t => t.url === clean);
+        if (existing) openShellTab(existing.id);
+        else openBrowserTabWithUrl(clean);
+        return;
+      }
       viewMode = 'devserver';
       openPanel('artifacts');
     },
@@ -1479,12 +2163,14 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
       inspectorData = data;
       inspTabBtn.hidden = false;
       inspTabBtn.textContent = `${data.memberName || '成员'} · 思路`;
-      if (!host.hidden && activeTab === 'inspector') {
+      if (!host.hidden && shellTab === 'home' && activeTab === 'inspector') {
         renderInspectorPane();
       }
     },
     close,
     clear() {
+      if (shellTab === 'desktop') onDetachDesktopEmbed?.();
+      if (shellTab === 'canvas') modelCanvasCtrl.deactivate();
       cleanupPreviewHost();
       currentRunId = '';
       files = [];
@@ -1505,7 +2191,16 @@ export function createWorkArtifactsDock({ api, onVisibilityChange, onLayoutChang
       checkpointFileCache.clear();
       inspTabBtn.hidden = true;
       artTabBtn.textContent = '实时画布';
-      close();
+      if (shellTab !== 'home') {
+        shellTab = 'home';
+        homeShellPane.hidden = false;
+        canvasShellPane.hidden = true;
+        desktopShellPane.hidden = true;
+        webShellPane.hidden = true;
+        navBar.hidden = true;
+        renderBrowserTabBar();
+      }
+      close({ byUser: false });
     },
   };
 }

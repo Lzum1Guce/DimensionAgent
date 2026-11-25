@@ -10,6 +10,12 @@
 import { createGalgameVoiceController } from './galgame-voice.js';
 import { createGalgameBgmController, BGM_TRACKS } from './galgame-bgm.js';
 import { extractInnerVoice, rollFateDice, v3Icon } from './story-theater-v3.js';
+import {
+  createPixelTheaterController,
+  PIXEL_THEATER_BACKDROPS,
+  PIXEL_THEATER_ACTIONS,
+  hasPixelActorPack,
+} from './pixel-theater-stage.js';
 
 const STORAGE_KEYS = {
   bgId: 'dimension.galgame.bgId.v2',
@@ -23,6 +29,9 @@ const STORAGE_KEYS = {
   sfxVolume: 'dimension.galgame.sfxVolume.v1',
   typingSpeed: 'dimension.galgame.typingSpeed.v1',
   autoDelayMs: 'dimension.galgame.autoDelayMs.v1',
+  stageMode: 'dimension.galgame.stageMode.v1',
+  pixelQuality: 'dimension.galgame.pixelQuality.v1',
+  pixelBgId: 'dimension.galgame.pixelBgId.v1',
 };
 
 const BG_IDB_NAME = 'dimension.galgame.assets.v1';
@@ -73,10 +82,11 @@ async function idbSetCustomBg(dataUrl) {
 }
 
 const PRESET_BGS = [
-  { id: 'observatory', label: '星夜天文台', url: '/dimension-ui/gal-bgs/observatory.webp?v=e4c726fd80' },
-  { id: 'classroom',   label: '黄昏教室',   url: '/dimension-ui/gal-bgs/classroom.webp?v=532918eb7e' },
-  { id: 'study',       label: '深夜书房',   url: '/dimension-ui/gal-bgs/study.webp?v=123ae6aa8d' },
-  { id: 'cafe',        label: '星光咖啡馆', url: '/dimension-ui/gal-bgs/cafe.webp?v=25e7dc9151' },
+  { id: 'observatory',    label: '星夜天文台',    url: '/dimension-ui/gal-bgs/observatory.webp?v=e4c726fd80' },
+  { id: 'classroom',      label: '黄昏教室',      url: '/dimension-ui/gal-bgs/classroom.webp?v=532918eb7e' },
+  { id: 'study',          label: '深夜书房',      url: '/dimension-ui/gal-bgs/study.webp?v=123ae6aa8d' },
+  { id: 'cafe',           label: '星光咖啡馆',    url: '/dimension-ui/gal-bgs/cafe.webp?v=25e7dc9151' },
+  { id: 'ai-girls-group', label: 'AI 娘全员合照', url: '/dimension-ui/gal-bgs/ai-girls-group.webp?v=6401e11204' },
 ];
 
 const MOOD_META = {
@@ -729,6 +739,7 @@ const galState = {
     hasEnding: false,
     lastStageCueKey: '',
     lastStageCue: null,
+    pendingStageCue: null,
   },
   botId: '',
   botName: 'Gemini',
@@ -757,6 +768,8 @@ const galState = {
     timer: 0,
     skipped: false,
     pausedBeatIdx: -1,
+    speakerId: '',
+    isNarrator: false,
   },
   streamActive: false,
   historyCursor: -1, // -1 means latest
@@ -775,6 +788,10 @@ const galState = {
   lastTickSfxAt: 0,
   lastEggFxAt: 0,
   eggFxTimer: 0,
+  stageMode: 'gal', // 'gal' (2.5D 立绘舞台) | 'pixel' (欧式分层像素剧院)
+  pixelQuality: 'pixel', // 'pixel' (Hi-Bit 软像素) | 'hd' (高清幕布)
+  pixelBgId: 'starry_library',
+  pixelCtrl: null,
   hooks: {},
   els: {},
   preloaded: new Set(),
@@ -848,6 +865,114 @@ function applyBackground(url) {
   };
   if (nextEl.complete) reveal();
   else nextEl.onload = reveal;
+}
+
+function isPixelStageMode() {
+  return galState.stageMode === 'pixel';
+}
+
+function getFallbackSpriteUrlForPixel(botId, moodKey) {
+  const pack = SPRITE_PACKS[botId];
+  if (!pack) return '';
+  const spec = pack.moods?.[moodKey] || pack.moods?.neutral || { base: 'neutral' };
+  return pack.bases?.[spec.base] || pack.bases?.neutral || '';
+}
+
+function syncPixelTheaterBackdrop() {
+  const ctrl = galState.pixelCtrl;
+  if (!ctrl) return;
+  if (galState.bgId === 'custom' && galState.customBg) {
+    ctrl.setBackdrop('custom', galState.customBg);
+    return;
+  }
+  ctrl.setBackdrop(galState.pixelBgId || 'starry_library');
+}
+
+function syncPixelTheaterCast() {
+  const ctrl = galState.pixelCtrl;
+  if (!ctrl || !galState.enabled || !isPixelStageMode()) return;
+  ctrl.syncCast({
+    isGroupChat: galState.isGroupChat,
+    members: galState.groupMembers,
+    castOrder: galState.castOrder,
+    activeSpeakerId: galState.activeSpeakerId,
+    memberMoods: galState.memberMoods,
+    soloBotId: galState.botId,
+    soloBotName: galState.botName,
+    soloAvatarUrl: galState.avatarUrl,
+    soloMood: galState.mood,
+    fallbackSpriteUrlOf: getFallbackSpriteUrlForPixel,
+    speaking: Boolean(galState.speaking),
+  });
+}
+
+function syncPixelTheaterControls() {
+  const pixelOn = isPixelStageMode();
+  const { stageModeBtn, curtainBtn, zoomBtn, drawerStageModeBtn, pixelActionsWrap, optPixelQualityRow, optPixelQualityChk } = galState.els;
+  if (stageModeBtn) {
+    stageModeBtn.textContent = pixelOn ? '立绘舞台' : '像素剧院';
+    stageModeBtn.classList.toggle('is-pixel-on', pixelOn);
+    stageModeBtn.title = pixelOn ? '切换回 2.5D 高清立绘舞台' : '切换为欧式分层像素剧院舞台（支持 DeepSeek / Gemini 58 套精修循环动画）';
+  }
+  if (drawerStageModeBtn) {
+    drawerStageModeBtn.textContent = pixelOn ? '切换为 2.5D 立绘舞台' : '切换为欧式像素剧院';
+  }
+  if (curtainBtn) {
+    curtainBtn.hidden = !pixelOn;
+    if (pixelOn && galState.pixelCtrl) {
+      curtainBtn.textContent = galState.pixelCtrl.getCurtainOpen() >= 0.5 ? '合幕' : '开幕';
+    }
+  }
+  if (zoomBtn) {
+    zoomBtn.hidden = pixelOn;
+  }
+  if (pixelActionsWrap) {
+    const targetId = galState.isGroupChat
+      ? (galState.activeSpeakerId || galState.castOrder[0] || '')
+      : (galState.botId || '');
+    const anyPixel = galState.isGroupChat
+      ? galState.castOrder.some((id) => hasPixelActorPack(id)) || galState.groupMembers.some((m) => hasPixelActorPack(m.id))
+      : hasPixelActorPack(targetId);
+    pixelActionsWrap.hidden = !(pixelOn && anyPixel);
+  }
+  if (optPixelQualityRow) {
+    optPixelQualityRow.hidden = !pixelOn;
+  }
+  if (optPixelQualityChk) {
+    optPixelQualityChk.checked = galState.pixelQuality === 'hd';
+  }
+}
+
+function setStageMode(nextMode, { silent = false } = {}) {
+  const mode = nextMode === 'pixel' ? 'pixel' : 'gal';
+  if (galState.stageMode === mode && galState.pixelCtrl?.isActive() === (mode === 'pixel' && galState.enabled)) {
+    syncPixelTheaterControls();
+    return;
+  }
+  galState.stageMode = mode;
+  writePref(STORAGE_KEYS.stageMode, mode);
+  if (galState.pixelCtrl) {
+    const active = Boolean(galState.enabled && isImmersiveEligible() && mode === 'pixel');
+    galState.pixelCtrl.setQuality(galState.pixelQuality);
+    galState.pixelCtrl.setMotionEnabled(galState.motionEnabled);
+    if (active) {
+      syncPixelTheaterBackdrop();
+      galState.pixelCtrl.setActive(true, { playOpeningCurtain: true });
+      syncPixelTheaterCast();
+    } else {
+      galState.pixelCtrl.setActive(false);
+    }
+  }
+  if (galState.els.bgGrid) buildBgGrid(galState.els.bgGrid);
+  applyAppearanceSettings();
+  syncPixelTheaterControls();
+  renderGalStoryUI();
+  if (!silent) {
+    playGalSfx('switch');
+    showMiniToast(mode === 'pixel'
+      ? '已切换至欧式像素剧院 · 点击舞台木地板可让角色走位'
+      : '已切换回 2.5D 高清立绘舞台');
+  }
 }
 
 let galAudioCtx = null;
@@ -1058,6 +1183,9 @@ function triggerEasterEggAction(kind) {
     : (galState.botId || '');
   const nextMood = meta.botMood[targetId] || meta.botMood.default;
   setMood(nextMood, { animate: true, force: true });
+  if (isPixelStageMode() && galState.pixelCtrl) {
+    galState.pixelCtrl.triggerEasterEgg(targetId, kind);
+  }
   spawnEasterEggFx(kind);
   playGalSfx(meta.sfx);
   showMiniToast(meta.botToast[targetId] || meta.botToast.default);
@@ -1286,14 +1414,71 @@ function updateGroupTypingPill() {
 }
 
 function syncGroupSpeakerFaceWindow(memberId, moodKey) {
-  const { stage, faceWin } = galState.els;
-  if (!faceWin) return;
-  // 多人群聊舞台本身已展示全员大立绘，隐藏左下角小立绘窗以避免角色重影与遮挡台词左侧正文
-  if (galState.isGroupChat) {
+  const { stage, faceWin, faceImgA, faceImgB, facePatch, faceBlink } = galState.els;
+  if (!faceWin || !galState.isGroupChat) return;
+  // 传统 2.5D 群聊舞台已展示全员大立绘，隐藏左下角小立绘窗以避免重影；
+  // 欧式像素剧院模式下在底部台词左侧展示当前发言角色的高清半身立绘（随情绪同步差分），旁白或用户回合自动隐藏。
+  const shouldHide = !isPixelStageMode()
+    || !galState.faceWindowEnabled
+    || galState.turn === 'user'
+    || !memberId
+    || memberId === 'user'
+    || memberId === 'system';
+  if (shouldHide) {
     faceWin.hidden = true;
     stage?.classList.add('is-face-off');
     return;
   }
+
+  const member = galState.groupMembers.find((m) => m.id === memberId)
+    || { id: memberId, name: galState.activeSpeakerName || memberId, avatarUrl: '' };
+  const labelName = member.name || memberId;
+  const pack = SPRITE_PACKS[memberId];
+  const switchedSpeaker = faceWin.dataset.speakerId !== memberId;
+  if (faceBlink) faceBlink.classList.remove('is-shown');
+
+  if (pack && faceImgA) {
+    preloadSpritePack(memberId);
+    applyFaceWindowCalibration(faceImgA.parentElement, memberId);
+    faceWin.classList.remove('is-avatar-fallback');
+    const m = normalizeMood(moodKey) || 'neutral';
+    const spec = pack.moods[m] || pack.moods.neutral;
+    const baseUrl = pack.bases[spec.base] || pack.bases.neutral;
+    crossfadeBasePair(faceImgA, faceImgB, baseUrl, { instant: switchedSpeaker });
+    if (facePatch) {
+      applyPatchBox(facePatch, spec.box || pack.box);
+      if (spec.patch) {
+        if (facePatch.dataset.src !== spec.patch) {
+          facePatch.dataset.src = spec.patch;
+          facePatch.src = spec.patch;
+        }
+        facePatch.classList.add('is-shown');
+      } else {
+        facePatch.classList.remove('is-shown');
+      }
+    }
+    faceWin.dataset.speakerId = memberId;
+    faceWin.hidden = false;
+    stage?.classList.remove('is-face-off');
+    faceWin.title = `${labelName} · 点击快速 @她 发言`;
+    faceWin.setAttribute('aria-label', `${labelName} 半身立绘`);
+    return;
+  }
+
+  if (faceImgA && member.avatarUrl) {
+    faceWin.classList.add('is-avatar-fallback');
+    if (facePatch) facePatch.classList.remove('is-shown');
+    crossfadeBasePair(faceImgA, faceImgB, member.avatarUrl, { instant: true });
+    faceWin.dataset.speakerId = memberId;
+    faceWin.hidden = false;
+    stage?.classList.remove('is-face-off');
+    faceWin.title = `${labelName} · 点击快速 @她 发言`;
+    faceWin.setAttribute('aria-label', `${labelName} 头像`);
+    return;
+  }
+
+  faceWin.hidden = true;
+  stage?.classList.add('is-face-off');
 }
 
 function renderGroupCast({ animateSpeaker = false } = {}) {
@@ -1430,9 +1615,10 @@ function renderGroupCast({ animateSpeaker = false } = {}) {
     }
   });
 
-  const faceTargetId = galState.activeSpeakerId || visibleIds[0] || '';
-  syncGroupSpeakerFaceWindow(faceTargetId, galState.memberMoods[faceTargetId] || 'neutral');
+  const faceTargetId = galState.activeSpeakerId || '';
+  syncGroupSpeakerFaceWindow(faceTargetId, faceTargetId ? (galState.memberMoods[faceTargetId] || 'neutral') : 'neutral');
   syncMoodPopoverForCurrentChar();
+  syncPixelTheaterCast();
 }
 
 const DEFAULT_MOOD_PILL_LABELS = {
@@ -1487,6 +1673,7 @@ function syncMoodPopoverForCurrentChar() {
       btn.title = `微表情差分：${displayLabel}`;
     }
   }
+  syncPixelTheaterControls();
 }
 
 function setMood(nextMood, { animate = true, force = false } = {}) {
@@ -1511,13 +1698,18 @@ function setMood(nextMood, { animate = true, force = false } = {}) {
 
   if (galState.isGroupChat) {
     const targetId = galState.activeSpeakerId || galState.castOrder[0] || '';
-    if (targetId) galState.memberMoods[targetId] = m;
+    if (targetId) {
+      galState.memberMoods[targetId] = m;
+      if (force && galState.pixelCtrl) galState.pixelCtrl.clearActorOverrides(targetId);
+    }
     renderGroupCast({ animateSpeaker: animate && changed });
     return;
   }
 
   applyHybridSprite(m);
   renderEmoteOverlay(m);
+  if (force && galState.pixelCtrl) galState.pixelCtrl.clearActorOverrides(galState.botId);
+  syncPixelTheaterCast();
 
   if (animate && changed && galState.motionEnabled && spriteMotion) {
     spriteMotion.classList.remove(...ALL_MOTION_ANIMS);
@@ -1560,9 +1752,11 @@ function renderCharacterVisual() {
     applyHybridSprite(galState.mood, { instant: true });
     renderEmoteOverlay(galState.mood);
     if (faceWin) {
+      faceWin.dataset.speakerId = galState.botId || '';
       faceWin.hidden = !galState.faceWindowEnabled;
       stage?.classList.toggle('is-face-off', !galState.faceWindowEnabled);
     }
+    syncThinkingDrawerState();
     scheduleNextBlink();
   } else {
     spriteRig.hidden = true;
@@ -1576,14 +1770,17 @@ function renderCharacterVisual() {
     if (faceWin && faceImgA && galState.avatarUrl) {
       faceWin.classList.add('is-avatar-fallback');
       crossfadeBasePair(faceImgA, faceImgB, galState.avatarUrl, { instant: true });
+      faceWin.dataset.speakerId = galState.botId || '';
       faceWin.hidden = !galState.faceWindowEnabled;
       stage?.classList.toggle('is-face-off', !galState.faceWindowEnabled);
+      syncThinkingDrawerState();
     } else if (faceWin) {
       faceWin.hidden = true;
       stage?.classList.add('is-face-off');
     }
     clearTimeout(galState.blinkTimer);
   }
+  syncPixelTheaterCast();
 }
 
 const BEAT_CARRY_MAP = {
@@ -2012,6 +2209,8 @@ function resetPerformance() {
   galState.perf.phase = 'idle';
   galState.perf.skipped = false;
   galState.perf.pausedBeatIdx = -1;
+  galState.perf.speakerId = '';
+  galState.perf.isNarrator = false;
 }
 
 function currentPerfSpeaker() {
@@ -2064,12 +2263,20 @@ function fastForwardPerformance() {
   perf.skipped = true;
   if (!perf.beats.length) return;
 
+  const prevBeatIdx = perf.beatIdx;
   perf.beatIdx = perf.beats.length - 1;
   const lastBeat = perf.beats[perf.beatIdx];
   perf.charIdx = lastBeat.text.length;
 
   if (lastBeat.mood) {
     applyPerfBeatMood(lastBeat.mood, { animate: lastBeat.mood !== galState.mood });
+  }
+  if (isPixelStageMode() && galState.pixelCtrl && perf.beatIdx > prevBeatIdx && lastBeat.text && lastBeat.text.trim()) {
+    galState.pixelCtrl.directByStoryLine({
+      speakerId: perf.speakerId || (galState.isGroupChat ? galState.activeSpeakerId : galState.botId),
+      text: lastBeat.text,
+      isNarrator: Boolean(perf.isNarrator),
+    });
   }
 
   if (galState.streamActive && galState.isSoloChat) {
@@ -2139,6 +2346,14 @@ function stepPerformance() {
   }
   if (isBeatStart) {
     triggerBoxFeedback(cur.mood, cur.text);
+    if (isPixelStageMode() && galState.pixelCtrl && cur.text && cur.text.trim()) {
+      // 画面（角色走位、跑动与剧场动作）严格跟随剧场字幕盒当下正在演出的这一句
+      galState.pixelCtrl.directByStoryLine({
+        speakerId: perf.speakerId || (galState.isGroupChat ? galState.activeSpeakerId : galState.botId),
+        text: cur.text,
+        isNarrator: Boolean(perf.isNarrator),
+      });
+    }
     const autoEgg = detectEasterEggKind(cur.text);
     if (autoEgg) {
       const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -2279,6 +2494,13 @@ function showGroupQueueItem(idx, { animate = true, instant = false, save = true 
     if (animate) triggerBoxFeedback(galState.mood, item.clean);
   }
 
+  // 当剧场推进到最新一句时，再释放先前暂存的导演切景/氛围特效（绝不随后台聊天框提前抢跑切景！）
+  if (isAtGroupQueueEnd() && galState.story.pendingStageCue) {
+    const dueCue = galState.story.pendingStageCue;
+    galState.story.pendingStageCue = null;
+    applyDirectorStageCue(dueCue, { animateFx: Boolean(animate) });
+  }
+
   if (save) {
     ++readingSession;
     rememberGroupLine(item.messageId);
@@ -2303,10 +2525,20 @@ function showGroupQueueItem(idx, { animate = true, instant = false, save = true 
     galState.perf.charIdx = 0;
     galState.perf.skipped = false;
     galState.perf.pausedBeatIdx = -1;
+    galState.perf.speakerId = item.isNarrator ? '' : (item.speakerId || '');
+    galState.perf.isNarrator = Boolean(item.isNarrator);
     galState.speaking = true;
     renderGalStoryUI();
     stepPerformance();
     return;
+  }
+
+  if (animate && !instant && galState.enabled && isPixelStageMode() && galState.pixelCtrl) {
+    galState.pixelCtrl.directByStoryLine({
+      speakerId: item.isNarrator ? '' : (item.speakerId || ''),
+      text: item.clean,
+      isNarrator: Boolean(item.isNarrator),
+    });
   }
 
   galState.speaking = false;
@@ -2376,6 +2608,10 @@ function applyDirectorStageCue(cue, { animateFx = true } = {}) {
   if (scene && PRESET_BGS.some((b) => b.id === scene) && galState.bgId !== 'custom' && galState.bgId !== scene) {
     galState.bgId = scene;
     if (galState.enabled) applyBackground(resolveBgUrl(scene));
+  }
+  if (scene && PIXEL_THEATER_BACKDROPS.some((b) => b.id === scene) && galState.bgId !== 'custom') {
+    galState.pixelBgId = scene;
+    if (galState.enabled && isPixelStageMode()) syncPixelTheaterBackdrop();
   }
   if (mood) {
     ensureBgmController().setTrack(mood, { manual: false });
@@ -2469,6 +2705,7 @@ function renderGalDirectorDeck() {
       const act = btn.dataset.galV3;
       if (act !== 'toggle-dice') {
         directorDeck.hidden = true;
+        galState.els.stage?.classList.remove('is-director-deck-open');
         galState.els.storyHud?.querySelector('[data-gal-story="deck"]')?.classList.remove('is-open');
       }
       galState.hooks.onStoryV3Action?.(act);
@@ -2488,6 +2725,7 @@ function renderGalStoryUI() {
       storyHud.dataset.sig = '';
       storyHud.innerHTML = '';
       if (directorDeck) directorDeck.hidden = true;
+      galState.els.stage?.classList.remove('is-director-deck-open');
     } else {
       storyHud.hidden = false;
       const chapLabel = galState.story.chapter > 0 ? `第 ${galState.story.chapter} 幕` : '待开演';
@@ -2495,6 +2733,7 @@ function renderGalStoryUI() {
       const secCnt = galState.story.secretNotesCount || 0;
       const hasActiveTool = Boolean(secCnt || galState.story.diceMode || galState.story.innerVoiceEnabled);
       const deckOpen = Boolean(directorDeck && !directorDeck.hidden);
+      galState.els.stage?.classList.toggle('is-director-deck-open', deckOpen);
       const hudSig = `${confirmingAdvance}|${unreadLines()}|${galState.story.worldline}|${chapLabel}|${showForkBtn ? galState.story.pendingFork.choices.length : 0}|${galState.story.submitting ? 1 : 0}|${hasActiveTool ? 1 : 0}|${galState.story.hasEnding ? 1 : 0}|${deckOpen ? 1 : 0}`;
       if (storyHud.dataset.sig !== hudSig) {
         storyHud.dataset.sig = hudSig;
@@ -2560,6 +2799,24 @@ function renderGalStoryUI() {
 
   if (storyForkOverlay) {
     const shouldShowOverlay = Boolean(hasFork && atEnd && !galState.story.collapsed && !galState.story.submitting);
+    if (isPixelStageMode() && galState.pixelCtrl) {
+      storyForkOverlay.hidden = true;
+      galState.pixelCtrl.syncFateFork(shouldShowOverlay ? galState.story.pendingFork : null, {
+        forkKey: galState.story.forkKey,
+        shouldShow: shouldShowOverlay,
+        onSelect: (directive) => submitGalStoryDirective(directive, { opening: false }),
+        onCollapse: () => {
+          galState.story.collapsed = true;
+          renderGalStoryUI();
+          updateNextPrompt({ streaming: false });
+          showMiniToast('已收起抉择木牌 · 点击顶部「命运抉择」随时召唤');
+        },
+      });
+      return;
+    }
+    if (galState.pixelCtrl) {
+      galState.pixelCtrl.syncFateFork(null, { shouldShow: false });
+    }
     if (!shouldShowOverlay) {
       storyForkOverlay.hidden = true;
       if (!hasFork) {
@@ -2776,6 +3033,7 @@ function setTurn(nextTurn) {
     if (turnInputWrap) turnInputWrap.hidden = true;
     updateNextPrompt({ streaming: galState.speaking });
   }
+  refreshFaceWindowVisibility();
 }
 
 function renderDialogueContent(text, { thinking = false, streaming = false, partialQuote = false, speaker = null } = {}) {
@@ -3106,13 +3364,53 @@ function renderModelPopover() {
   const info = typeof galState.hooks.getModelInfo === 'function' ? galState.hooks.getModelInfo() : null;
   const choices = Array.isArray(info?.choices) ? info.choices : [];
   const cur = info?.current || null;
+  const isCurCli = Boolean(cur && (cur.mode === 'cli' || String(cur.providerId || '').startsWith('cli:') || cur.engineId));
   modelList.innerHTML = '';
-  if (!choices.length) {
-    modelList.innerHTML = '<div class="gal-model-empty">暂无可切换模型，请先在常规界面配置 API Key</div>';
+
+  if (typeof galState.hooks.onOpenCliReceptionModal === 'function') {
+    const cliRow = document.createElement('div');
+    cliRow.className = `gal-model-cli-row${isCurCli ? ' is-active' : ''}`;
+    const engId = String(cur?.engineId || String(cur?.providerId || '').replace(/^cli:/, '') || '').toLowerCase();
+    const engLabelMap = {
+      antigravity: 'Antigravity (agy)',
+      hermes: 'Hermes',
+      'kimi-code': 'Kimi Code',
+      'deepseek-harness': 'DeepSeek Harness',
+      'claude-code': 'Claude Code',
+      codex: 'Codex',
+      opencode: 'OpenCode',
+      'qwen-code': 'Qwen Code',
+      'gemini-cli': 'Gemini CLI',
+    };
+    const engName = engLabelMap[engId] || engId || '本机 CLI';
+    const cliSummary = isCurCli
+      ? `已启用 · ${engName}${cur?.model ? ` / ${String(cur.model).split('/').pop()}` : '（默认订阅）'}`
+      : '点击设置选择本机可用 CLI 模型';
+    cliRow.innerHTML = `
+      <div class="gal-model-cli-info">
+        <span class="gal-model-cli-title">本机 CLI 接待模型</span>
+        <span class="gal-model-cli-sub">${escapeText(cliSummary)}</span>
+      </div>
+      <button type="button" class="gal-model-cli-btn" data-role="gal-cli-settings">设置</button>
+    `;
+    cliRow.querySelector('[data-role="gal-cli-settings"]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closePopovers();
+      galState.hooks.onOpenCliReceptionModal();
+    });
+    modelList.appendChild(cliRow);
+  }
+
+  const apiChoices = choices.filter((c) => !String(c?.providerId || '').startsWith('cli:'));
+  if (!apiChoices.length && !isCurCli) {
+    const empty = document.createElement('div');
+    empty.className = 'gal-model-empty';
+    empty.textContent = '暂无维度 API 模型，可点击上方「设置」选用本机 CLI，或在常规界面配置 API Key';
+    modelList.appendChild(empty);
     return;
   }
-  for (const choice of choices) {
-    const isCurrent = Boolean(cur && cur.providerId === choice.providerId && cur.model === choice.model);
+  for (const choice of apiChoices) {
+    const isCurrent = Boolean(!isCurCli && cur && cur.providerId === choice.providerId && cur.model === choice.model);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `gal-model-item${isCurrent ? ' is-selected' : ''}`;
@@ -3194,6 +3492,7 @@ function closePopovers() {
   for (const key of Object.keys(panelButtons)) {
     if (galState.els[key]) galState.els[key].hidden = true;
   }
+  galState.els.stage?.classList.remove('is-director-deck-open');
   galState.els.storyHud?.querySelector('[data-gal-story="deck"]')?.classList.remove('is-open');
   for (const key of ['bgBtn', 'bgmPickerBtn', 'moodBtn', 'modelBtn', 'voicePickerBtn', 'settingsBtn']) {
     galState.els[key]?.classList.remove('is-active');
@@ -3206,17 +3505,32 @@ function setUiHidden(hidden) {
   if (galState.uiHidden) closePopovers();
 }
 
-function applyAppearanceSettings() {
+function refreshFaceWindowVisibility() {
   const { stage, faceWin } = galState.els;
+  if (!stage || !faceWin) return;
+  if (galState.isGroupChat) {
+    const speakerId = galState.activeSpeakerId || '';
+    syncGroupSpeakerFaceWindow(speakerId, speakerId ? (galState.memberMoods[speakerId] || galState.mood || 'neutral') : 'neutral');
+    return;
+  }
+  const hasFaceVisual = Boolean(SPRITE_PACKS[galState.botId] || galState.avatarUrl);
+  const showFace = Boolean(galState.faceWindowEnabled && hasFaceVisual);
+  faceWin.hidden = !showFace;
+  stage.classList.toggle('is-face-off', !showFace);
+}
+
+function applyAppearanceSettings() {
+  const { stage } = galState.els;
   if (!stage) return;
   stage.style.setProperty('--gal-box-opacity', String(galState.boxOpacity));
   stage.style.setProperty('--gal-font-size', `${galState.fontSize}px`);
   stage.classList.toggle('is-motion-off', !galState.motionEnabled);
   stage.dataset.zoom = galState.zoom;
-  const targetId = galState.isGroupChat ? (galState.activeSpeakerId || galState.castOrder[0] || '') : galState.botId;
-  const hasFaceVisual = !galState.isGroupChat && Boolean(SPRITE_PACKS[targetId] || galState.avatarUrl);
-  if (faceWin) faceWin.hidden = !(galState.faceWindowEnabled && hasFaceVisual);
-  stage.classList.toggle('is-face-off', !(galState.faceWindowEnabled && hasFaceVisual));
+  refreshFaceWindowVisibility();
+  if (galState.pixelCtrl) {
+    galState.pixelCtrl.setMotionEnabled(galState.motionEnabled);
+    galState.pixelCtrl.setQuality(galState.pixelQuality);
+  }
 }
 
 function applyStageVisibility({ forceSync = false } = {}) {
@@ -3252,6 +3566,12 @@ function applyStageVisibility({ forceSync = false } = {}) {
 
   if (active) {
     applyAppearanceSettings();
+    if (galState.pixelCtrl) {
+      const pixelActive = isPixelStageMode();
+      if (pixelActive) syncPixelTheaterBackdrop();
+      galState.pixelCtrl.setActive(pixelActive, { playOpeningCurtain: Boolean(pixelActive && justActivated) });
+    }
+    syncPixelTheaterControls();
     if (justActivated || forceSync) {
       setUiHidden(false);
       applyBackground(resolveBgUrl(galState.bgId));
@@ -3264,6 +3584,7 @@ function applyStageVisibility({ forceSync = false } = {}) {
     }
     renderGalStoryUI();
   } else {
+    if (galState.pixelCtrl) galState.pixelCtrl.setActive(false);
     clearTimeout(galState.blinkTimer);
     clearTimeout(galState.blinkTimeout);
     clearTimeout(galState.perf.timer);
@@ -3280,8 +3601,13 @@ function syncThinkingDrawerState() {
   const { drawerThinkBtn, faceWin } = galState.els;
   const on = nativeBtn?.getAttribute('aria-pressed') === 'true';
   if (faceWin) {
-    faceWin.classList.toggle('is-thinking-on', on);
-    faceWin.title = on ? '深度思考已开启（点击小立绘关闭）' : '点击小立绘开启深度思考模式';
+    if (galState.isGroupChat) {
+      faceWin.classList.remove('is-thinking-on');
+    } else {
+      faceWin.classList.toggle('is-thinking-on', on);
+      faceWin.title = on ? '深度思考已开启（点击小立绘关闭）' : '点击小立绘开启深度思考模式';
+      faceWin.setAttribute('aria-label', on ? '深度思考已开启，点击小立绘关闭' : '点击小立绘开启深度思考模式');
+    }
   }
   if (drawerThinkBtn) {
     drawerThinkBtn.classList.toggle('is-active', on);
@@ -3307,20 +3633,46 @@ function buildParticles(container) {
 
 function buildBgGrid(container) {
   container.innerHTML = '';
-  const list = [...PRESET_BGS];
+  const pixelOn = isPixelStageMode();
+  const baseList = pixelOn
+    ? PIXEL_THEATER_BACKDROPS.map((b) => ({
+        id: b.id,
+        label: b.label,
+        url: galState.pixelQuality === 'hd' ? b.hd : b.pixel,
+      }))
+    : [...PRESET_BGS];
+  const list = [...baseList];
   if (galState.customBg) {
     list.push({ id: 'custom', label: '自定义背景', url: galState.customBg });
   }
+  const activeId = pixelOn
+    ? (galState.bgId === 'custom' ? 'custom' : (galState.pixelBgId || 'starry_library'))
+    : galState.bgId;
   for (const bg of list) {
     const card = document.createElement('button');
     card.type = 'button';
-    card.className = `gal-bg-card${galState.bgId === bg.id ? ' is-selected' : ''}`;
+    card.className = `gal-bg-card${activeId === bg.id ? ' is-selected' : ''}`;
     card.dataset.bgId = bg.id;
     card.innerHTML = `<img src="${bg.url}" alt="${escapeText(bg.label)}" loading="lazy"><span>${escapeText(bg.label)}</span>`;
     card.addEventListener('click', () => {
-      galState.bgId = bg.id;
-      writePref(STORAGE_KEYS.bgId, bg.id);
-      applyBackground(resolveBgUrl(bg.id));
+      if (pixelOn) {
+        if (bg.id === 'custom') {
+          galState.bgId = 'custom';
+          writePref(STORAGE_KEYS.bgId, 'custom');
+        } else {
+          if (galState.bgId === 'custom') {
+            galState.bgId = PRESET_BGS.some((p) => p.id === bg.id) ? bg.id : 'observatory';
+            writePref(STORAGE_KEYS.bgId, galState.bgId);
+          }
+          galState.pixelBgId = bg.id;
+          writePref(STORAGE_KEYS.pixelBgId, bg.id);
+        }
+        syncPixelTheaterBackdrop();
+      } else {
+        galState.bgId = bg.id;
+        writePref(STORAGE_KEYS.bgId, bg.id);
+        applyBackground(resolveBgUrl(bg.id));
+      }
       playGalSfx('switch');
       for (const c of container.querySelectorAll('.gal-bg-card')) {
         c.classList.toggle('is-selected', c.dataset.bgId === bg.id);
@@ -3372,6 +3724,10 @@ export function initGalgameStage(hooks = {}) {
   galState.autoDelayMs = Math.max(800, Math.min(4500, parseInt(readPref(STORAGE_KEYS.autoDelayMs, '2000'), 10) || 2000));
   galState.boxOpacity = Math.max(0.35, Math.min(1, parseFloat(readPref(STORAGE_KEYS.boxOpacity, '0.86')) || 0.86));
   galState.fontSize = Math.max(16, Math.min(28, parseInt(readPref(STORAGE_KEYS.fontSize, '21'), 10) || 21));
+  galState.stageMode = readPref(STORAGE_KEYS.stageMode, 'gal') === 'pixel' ? 'pixel' : 'gal';
+  galState.pixelQuality = readPref(STORAGE_KEYS.pixelQuality, 'pixel') === 'hd' ? 'hd' : 'pixel';
+  const savedPixelBg = readPref(STORAGE_KEYS.pixelBgId, 'starry_library');
+  galState.pixelBgId = PIXEL_THEATER_BACKDROPS.some((b) => b.id === savedPixelBg) ? savedPixelBg : 'starry_library';
 
   // 从 IndexedDB 异步读取自定义背景；若检测到旧版 localStorage 残留则自动迁移释放配额
   void idbGetCustomBg().then((storedBg) => {
@@ -3381,7 +3737,10 @@ export function initGalgameStage(hooks = {}) {
         try { localStorage.removeItem(STORAGE_KEYS.customBg); } catch {}
       }
       if (galState.els.bgGrid) buildBgGrid(galState.els.bgGrid);
-      if (galState.enabled && galState.bgId === 'custom') applyBackground(storedBg);
+      if (galState.enabled && galState.bgId === 'custom') {
+        applyBackground(storedBg);
+        if (isPixelStageMode()) syncPixelTheaterBackdrop();
+      }
     } else if (legacyCustomBg) {
       void idbSetCustomBg(legacyCustomBg).then(() => {
         try { localStorage.removeItem(STORAGE_KEYS.customBg); } catch {}
@@ -3439,6 +3798,7 @@ export function initGalgameStage(hooks = {}) {
         <span>沉浸快捷栏</span>
         <span style="font-weight:400;opacity:0.75;">右键隐藏框</span>
       </div>
+      <button type="button" class="gal-drawer-btn" id="galDrawerStageModeBtn">切换为欧式像素剧院</button>
       <button type="button" class="gal-drawer-btn" id="galDrawerThinkBtn">✦ 深度思考</button>
       <button type="button" class="gal-drawer-btn" id="galDrawerHideBtn">隐藏对话框（H / 右键）</button>
       <button type="button" class="gal-drawer-btn" id="galDrawerExitBtn">退出沉浸模式（Esc）</button>
@@ -3529,6 +3889,8 @@ export function initGalgameStage(hooks = {}) {
         </div>
 
         <div class="gal-bar-links">
+          <button type="button" class="gal-link-btn" id="galStageModeBtn" title="在 2.5D 高清立绘舞台与欧式像素剧院之间无缝切换">像素剧院</button>
+          <button type="button" class="gal-link-btn" id="galCurtainBtn" hidden title="拉开或合拢剧院红色丝绒大幕布">合幕</button>
           <button type="button" class="gal-link-btn" id="galSpeakBtn" title="打开/收起沉浸发言输入框">发言</button>
           <button type="button" class="gal-link-btn" id="galBgPickerBtn">场景</button>
           <button type="button" class="gal-link-btn" id="galBgmPickerBtn" title="智能 BGM 氛围音乐（配音发声自动压低）">BGM</button>
@@ -3584,6 +3946,15 @@ export function initGalgameStage(hooks = {}) {
         <button type="button" class="gal-mood-pill" data-mood="hiss">炸毛哈气</button>
         <button type="button" class="gal-mood-pill" data-mood="crying">委屈大哭</button>
       </div>
+      <div class="gal-pixel-actions-wrap" id="galPixelActionsWrap" hidden>
+        <div class="gal-pixel-actions-head">
+          <span>像素剧院动作演播（12 套真循环）</span>
+          <span style="opacity:0.74;">点击角色演绎</span>
+        </div>
+        <div class="gal-pixel-actions-grid" id="galPixelActionsGrid">
+          ${PIXEL_THEATER_ACTIONS.map((a) => `<button type="button" class="gal-pixel-act-btn" data-pixel-act="${a.key}">${a.label}</button>`).join('')}
+        </div>
+      </div>
     </div>
 
     <div class="gal-popover" id="galModelPopover" hidden style="width:296px;">
@@ -3601,6 +3972,10 @@ export function initGalgameStage(hooks = {}) {
       <label class="gal-setting-row">
         <span>左下角联动小立绘</span>
         <input type="checkbox" id="galOptFaceWin" ${galState.faceWindowEnabled ? 'checked' : ''}>
+      </label>
+      <label class="gal-setting-row" id="galOptPixelQualityRow" hidden>
+        <span>像素剧院使用高清幕布</span>
+        <input type="checkbox" id="galOptPixelQualityChk" ${galState.pixelQuality === 'hd' ? 'checked' : ''}>
       </label>
       <div class="gal-setting-row is-col">
         <span>打字机演译速度</span>
@@ -3697,6 +4072,8 @@ export function initGalgameStage(hooks = {}) {
     copyLineBtn: stage.querySelector('#galCopyLineBtn'),
     prevLineBtn: stage.querySelector('#galPrevLineBtn'),
     nextLineBtn: stage.querySelector('#galNextLineBtn'),
+    stageModeBtn: stage.querySelector('#galStageModeBtn'),
+    curtainBtn: stage.querySelector('#galCurtainBtn'),
     speakBtn: stage.querySelector('#galSpeakBtn'),
     bgBtn: stage.querySelector('#galBgPickerBtn'),
     bgmPickerBtn: stage.querySelector('#galBgmPickerBtn'),
@@ -3713,6 +4090,7 @@ export function initGalgameStage(hooks = {}) {
     exitBtn: stage.querySelector('#galExitBtn'),
     sideTab: stage.querySelector('#galSideTab'),
     sideDrawer: stage.querySelector('#galSideDrawer'),
+    drawerStageModeBtn: stage.querySelector('#galDrawerStageModeBtn'),
     drawerThinkBtn: stage.querySelector('#galDrawerThinkBtn'),
     drawerHideBtn: stage.querySelector('#galDrawerHideBtn'),
     drawerExitBtn: stage.querySelector('#galDrawerExitBtn'),
@@ -3726,6 +4104,8 @@ export function initGalgameStage(hooks = {}) {
     eggBar: stage.querySelector('#galEggBar'),
     eggFxLayer: stage.querySelector('#galEggFxLayer'),
     moodGrid: stage.querySelector('#galMoodGrid'),
+    pixelActionsWrap: stage.querySelector('#galPixelActionsWrap'),
+    pixelActionsGrid: stage.querySelector('#galPixelActionsGrid'),
     modelPopover: stage.querySelector('#galModelPopover'),
     modelList: stage.querySelector('#galModelList'),
     voicePopover: stage.querySelector('#galVoicePopover'),
@@ -3733,6 +4113,8 @@ export function initGalgameStage(hooks = {}) {
     voiceBody: stage.querySelector('#galVoiceBody'),
     settingsPopover: stage.querySelector('#galSettingsPopover'),
     optFaceWin: stage.querySelector('#galOptFaceWin'),
+    optPixelQualityRow: stage.querySelector('#galOptPixelQualityRow'),
+    optPixelQualityChk: stage.querySelector('#galOptPixelQualityChk'),
     optSpeedSeg: stage.querySelector('#galOptSpeedSeg'),
     optSfxVol: stage.querySelector('#galOptSfxVol'),
     optVolVal: stage.querySelector('#galOptVolVal'),
@@ -3800,7 +4182,7 @@ export function initGalgameStage(hooks = {}) {
       setUiHidden(false);
       return;
     }
-    if (e.target.closest('.gal-popover') || e.target.closest('.gal-bottom-bar') || e.target.closest('.gal-side-drawer') || e.target.closest('.gal-side-tab') || e.target.closest('.gal-face-window') || e.target.closest('.gal-backlog-overlay') || e.target.closest('.gal-story-hud') || e.target.closest('.gal-story-fork-overlay')) {
+    if (e.target.closest('.gal-popover') || e.target.closest('.gal-bottom-bar') || e.target.closest('.gal-side-drawer') || e.target.closest('.gal-side-tab') || e.target.closest('.gal-face-window') || e.target.closest('.gal-backlog-overlay') || e.target.closest('.gal-story-hud') || e.target.closest('.gal-story-fork-overlay') || e.target.closest('.pt-choice-host') || e.target.closest('.pt-floor-hitbox') || e.target.closest('.pt-actor')) {
       return;
     }
     const hadPopover = openStagePanel();
@@ -3814,9 +4196,26 @@ export function initGalgameStage(hooks = {}) {
     }
   });
 
-  // Left Face Window click toggles Deep Thinking with luminous outline aura!
+  // Left Face Window click: 1v1 toggles Deep Thinking; group pixel theater quickly @mentions current speaker!
   galState.els.faceWin?.addEventListener('click', (e) => {
     e.stopPropagation();
+    if (galState.isGroupChat) {
+      const targetId = galState.activeSpeakerId || galState.els.faceWin?.dataset?.speakerId || '';
+      const member = galState.groupMembers.find((m) => m.id === targetId);
+      const mentionName = member?.name || galState.activeSpeakerName || '';
+      if (!mentionName || mentionName.startsWith('✦')) return;
+      if (galState.turn !== 'user') setTurn('user');
+      const field = galState.els.turnTextarea;
+      if (field) {
+        const mention = `@${mentionName} `;
+        if (!field.value.includes(mention)) {
+          field.value = `${field.value}${field.value && !field.value.endsWith(' ') ? ' ' : ''}${mention}`;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        field.focus();
+      }
+      return;
+    }
     const nativeBtn = document.getElementById('chatThinkingToggle');
     if (!nativeBtn) return;
     nativeBtn.click();
@@ -4590,6 +4989,11 @@ export function initGalgameStage(hooks = {}) {
   galState.els.moodGrid?.addEventListener('click', (e) => {
     const btn = e.target.closest('.gal-mood-pill');
     if (!btn) return;
+    if (galState.els.pixelActionsGrid) {
+      for (const b of galState.els.pixelActionsGrid.querySelectorAll('.gal-pixel-act-btn')) {
+        b.classList.remove('is-active');
+      }
+    }
     setMood(btn.dataset.mood, { animate: true, force: true });
   });
   galState.els.eggBar?.addEventListener('click', (e) => {
@@ -4703,11 +5107,7 @@ export function initGalgameStage(hooks = {}) {
     applyAppearanceSettings();
   });
 
-  // Custom local background upload (stored in IndexedDB to avoid 5MB localStorage silent failure)
-  galState.els.uploadBgBtn?.addEventListener('click', () => galState.els.bgFileInput?.click());
-  galState.els.bgFileInput?.addEventListener('change', () => {
-    const file = galState.els.bgFileInput.files?.[0];
-    galState.els.bgFileInput.value = '';
+  const applyCustomBgFile = (file) => {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
@@ -4725,6 +5125,7 @@ export function initGalgameStage(hooks = {}) {
         writePref(STORAGE_KEYS.bgId, 'custom');
         buildBgGrid(galState.els.bgGrid);
         applyBackground(dataUrl);
+        if (isPixelStageMode()) syncPixelTheaterBackdrop();
         playGalSfx('switch');
         void idbSetCustomBg(dataUrl).then(() => {
           try { localStorage.removeItem(STORAGE_KEYS.customBg); } catch {}
@@ -4737,8 +5138,97 @@ export function initGalgameStage(hooks = {}) {
       img.src = String(reader.result || '');
     };
     reader.readAsDataURL(file);
+  };
+
+  // 初始化欧式分层像素剧院舞台控制器（默认按偏好挂载，闲置时零 RAF 消耗）
+  galState.pixelCtrl = createPixelTheaterController(stage, {
+    onCurtainChange: (openVal) => {
+      if (galState.els.curtainBtn) {
+        galState.els.curtainBtn.textContent = openVal >= 0.5 ? '合幕' : '开幕';
+      }
+    },
+    onActorClick: (botId, name) => {
+      if (galState.uiHidden) {
+        setUiHidden(false);
+        return;
+      }
+      closePopovers();
+      if (!galState.isGroupChat) return;
+      if (hasPendingStoryFork() && !galState.story.collapsed) {
+        galState.story.collapsed = true;
+        renderGalStoryUI();
+      }
+      if (galState.turn !== 'user') setTurn('user');
+      const field = galState.els.turnTextarea;
+      if (field && name) {
+        const mention = `@${name} `;
+        if (!field.value.includes(mention)) {
+          field.value = `${field.value}${field.value && !field.value.endsWith(' ') ? ' ' : ''}${mention}`;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        field.focus();
+      }
+    },
+    onDropCustomBackdrop: (file) => applyCustomBgFile(file),
+  });
+  if (galState.pixelCtrl) {
+    galState.pixelCtrl.setQuality(galState.pixelQuality);
+    galState.pixelCtrl.setMotionEnabled(galState.motionEnabled);
+    syncPixelTheaterBackdrop();
+  }
+
+  // 舞台模式切换（2.5D 立绘舞台 <-> 欧式分层像素剧院）与帷幕/动作控制
+  const toggleStageMode = (e) => {
+    e?.stopPropagation();
+    closePopovers();
+    setStageMode(isPixelStageMode() ? 'gal' : 'pixel');
+  };
+  galState.els.stageModeBtn?.addEventListener('click', toggleStageMode);
+  galState.els.drawerStageModeBtn?.addEventListener('click', toggleStageMode);
+  galState.els.curtainBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!galState.pixelCtrl || !isPixelStageMode()) return;
+    const next = galState.pixelCtrl.toggleCurtain();
+    playGalSfx('switch');
+    showMiniToast(next < 0.5 ? '正在合拢剧场红丝绒大幕…' : '正在拉开剧场红丝绒大幕…');
+  });
+  galState.els.pixelActionsGrid?.addEventListener('click', (e) => {
+    const btn = e.target.closest('.gal-pixel-act-btn');
+    if (!btn || !galState.pixelCtrl || !isPixelStageMode()) return;
+    e.stopPropagation();
+    const actKey = btn.dataset.pixelAct;
+    const targetId = galState.isGroupChat ? 'all' : (galState.botId || '');
+    const ok = galState.pixelCtrl.triggerActorAction(targetId, actKey, { durationMs: 0 });
+    if (ok) {
+      playGalSfx('switch');
+      for (const b of galState.els.pixelActionsGrid.querySelectorAll('.gal-pixel-act-btn')) {
+        b.classList.toggle('is-active', b === btn);
+      }
+      showMiniToast(`像素剧院动作演播：${btn.textContent}`);
+    } else {
+      showMiniToast('当前角色暂未配备像素动作包，DeepSeek 与 Gemini 已支持全套 29 动作');
+    }
+  });
+  galState.els.optPixelQualityChk?.addEventListener('change', () => {
+    galState.pixelQuality = galState.els.optPixelQualityChk.checked ? 'hd' : 'pixel';
+    writePref(STORAGE_KEYS.pixelQuality, galState.pixelQuality);
+    if (galState.pixelCtrl) {
+      galState.pixelCtrl.setQuality(galState.pixelQuality);
+      syncPixelTheaterBackdrop();
+    }
+    if (galState.els.bgGrid) buildBgGrid(galState.els.bgGrid);
+    showMiniToast(galState.pixelQuality === 'hd' ? '已切换至高清原画幕布' : '已切换至 Hi-Bit 软像素幕布');
   });
 
+  // Custom local background upload (stored in IndexedDB to avoid 5MB localStorage silent failure)
+  galState.els.uploadBgBtn?.addEventListener('click', () => galState.els.bgFileInput?.click());
+  galState.els.bgFileInput?.addEventListener('change', () => {
+    const file = galState.els.bgFileInput.files?.[0];
+    galState.els.bgFileInput.value = '';
+    applyCustomBgFile(file);
+  });
+
+  syncPixelTheaterControls();
   applyStageVisibility();
 }
 
@@ -4763,6 +5253,7 @@ function applyStoryConfigSnapshot(storyConfig) {
     galState.story.hasEnding = false;
     galState.story.lastStageCueKey = '';
     galState.story.lastStageCue = null;
+    galState.story.pendingStageCue = null;
     if (galState.els.directorFxLayer) {
       galState.els.directorFxLayer.dataset.mood = '';
       galState.els.directorFxLayer.classList.remove('fx-rain', 'fx-petals', 'fx-flash');
@@ -4789,8 +5280,15 @@ function applyStoryConfigSnapshot(storyConfig) {
     const isNewCue = cueKey !== galState.story.lastStageCueKey;
     galState.story.lastStageCueKey = cueKey;
     galState.story.lastStageCue = cue;
-    applyDirectorStageCue(cue, { animateFx: isNewCue });
+    // 若剧场队列还有尚未翻到的旧句，绝不随后台聊天框消息抢先切场景/特效，暂存至剧场推进到位再切！
+    if (galState.enabled && galState.isGroupChat && unreadLines() > 0) {
+      galState.story.pendingStageCue = cue;
+    } else {
+      galState.story.pendingStageCue = null;
+      applyDirectorStageCue(cue, { animateFx: isNewCue });
+    }
   } else if (!galState.story.autoDirectorFx && galState.els.directorFxLayer) {
+    galState.story.pendingStageCue = null;
     galState.els.directorFxLayer.dataset.mood = '';
     galState.els.directorFxLayer.classList.remove('fx-rain', 'fx-petals', 'fx-flash');
   }
@@ -5019,6 +5517,8 @@ export function onGalgameStream(phase, fullText = '') {
   galState.speaking = true;
   galState.perf.rawSource = fullText;
   galState.perf.beats = parsed.beats;
+  galState.perf.speakerId = galState.botId || '';
+  galState.perf.isNarrator = false;
   ensureVoiceController().feedTurnBeats({
     turnKey: `solo:${galState.botId}:${galVoiceTurnSeq}`,
     botId: galState.botId,
@@ -5088,6 +5588,9 @@ export function onGalgameMessage(role, text, { history = false } = {}) {
 
   if (galState.turn === 'user') setTurn('bot');
 
+  galState.perf.speakerId = galState.botId || '';
+  galState.perf.isNarrator = false;
+
   ensureVoiceController().feedTurnBeats({
     turnKey: `solo:${galState.botId}:${galVoiceTurnSeq}`,
     botId: galState.botId,
@@ -5118,12 +5621,17 @@ export function setGalgameBackgroundUrl(url, title = '') {
   if (!url) return;
   galState.bgId = 'custom';
   galState.customBg = url;
-  if (galState.enabled) applyBackground(url);
+  if (galState.enabled) {
+    applyBackground(url);
+    if (isPixelStageMode()) syncPixelTheaterBackdrop();
+  }
   if (title) showMiniToast(`已切换场景背景：${title}`);
 }
 
 export function getGalgameCgSnapshot(fallbackGroup = null) {
-  const bgUrl = resolveBgUrl(galState.bgId) || PRESET_BGS[0].url;
+  const bgUrl = (isPixelStageMode() && galState.pixelCtrl)
+    ? (galState.pixelCtrl.getBackdropUrl() || resolveBgUrl(galState.bgId) || PRESET_BGS[0].url)
+    : (resolveBgUrl(galState.bgId) || PRESET_BGS[0].url);
   const castSprites = [];
   const memberIds = galState.isGroupChat && galState.castOrder.length
     ? galState.castOrder.slice(0, 5)
