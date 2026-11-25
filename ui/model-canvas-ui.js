@@ -425,19 +425,8 @@ export function createModelCanvasPane({
     if (linkedWork.readyToStart && typeof linkedWork.onExecute === 'function') {
       const goBtn = el('button', 'mc-btn is-run mc-work-link-go', dirty ? '▶ 保存并按蓝图开工' : '▶ 按当前蓝图开工');
       goBtn.type = 'button';
-      goBtn.onclick = async () => {
-        goBtn.disabled = true;
-        try {
-          if (dirty) {
-            const ok = await saveCurrentGraph({ silent: true });
-            if (!ok) { goBtn.disabled = false; return; }
-          }
-          await linkedWork.onExecute(graph.id);
-        } catch (err) {
-          goBtn.disabled = false;
-          notify(`启动蓝图失败：${err?.message || err}`);
-        }
-      };
+      goBtn.disabled = starting;
+      goBtn.onclick = () => void startCircuitRun('');
       workLinkBar.append(goBtn);
     }
   };
@@ -724,6 +713,7 @@ export function createModelCanvasPane({
   const startCircuitRun = async (inputText) => {
     if (!api || !graph || starting || ['running', 'waiting_approval'].includes(activeRun?.status)) return;
     starting = true;
+    renderWorkLinkBar();
     renderRunChrome();
     try {
       if (navStack.length > 1) {
@@ -736,6 +726,14 @@ export function createModelCanvasPane({
       } else if (dirty) {
         const ok = await saveCurrentGraph({ silent: true });
         if (!ok) return;
+      }
+      if (linkedWork?.canvasId === graph.id) {
+        if (linkedWork.readyToStart && !linkedWork.executing && linkedWork.onExecute) {
+          await linkedWork.onExecute(graph.id);
+        } else {
+          notify('请在关联的 Work 任务中确认当前计划');
+        }
+        return;
       }
       const task = {
         canvasId: graph.id,
@@ -760,6 +758,7 @@ export function createModelCanvasPane({
       notify(`启动蓝图流程失败：${err?.message || err}`);
     } finally {
       starting = false;
+      renderWorkLinkBar();
       renderRunChrome();
     }
   };

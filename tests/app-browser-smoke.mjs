@@ -196,7 +196,7 @@ try {
         assert.equal(roster.bot.id, id);
         assert.equal(roster.bot.work, true);
         assert.equal(roster.bots.find(bot => bot.id === id)?.work, true);
-        await api('/api/dimension/work/settings', { method: 'PATCH', body: { botId: id, cliEngine: 'builtin' } });
+        await api('/api/dimension/work/settings', { method: 'PATCH', body: { botId: id, cliEngine: 'builtin', workspaceMode: 'windows_native', projectCwd: outputDirectory, approvalMode: 'full' } });
     }
 
     const profile = join(outputDirectory, 'chrome-profile');
@@ -289,11 +289,11 @@ try {
     await waitFor(() => cdp.evaluate(`document.querySelector('#modeSwitch').textContent==='Work'`), 'Work mode');
     await waitFor(() => visible('.work-new-thread-stage'), 'Chat selection opens a fresh Work thread');
     assert.equal(await cdp.evaluate(`document.querySelectorAll('.work-run').length`), 0);
-    await fill('#composerInput', 'APPTEST:browser');
+    await fill('#composerInput', '直接做，不用先出计划 APPTEST:browser');
     await click('#sendBtn');
     const run = await waitFor(async () => {
         const sessions = await api(`/api/dimension/work/sessions?botId=${alpha}&limit=10`);
-        const row = sessions.runs.find(row => row.text === 'APPTEST:browser');
+        const row = sessions.runs.find(row => row.text === '直接做，不用先出计划 APPTEST:browser');
         if (row && ['failed', 'partial', 'cancelled'].includes(row.status)) throw new Error(JSON.stringify(row));
         return row?.status === 'completed' ? row : null;
     }, 'browser submitted Work task completes', 25000);

@@ -18,6 +18,8 @@
 
 namespace dimension {
 
+std::string canvas_text_prefix(std::string_view text, std::size_t byte_budget);
+
 struct CanvasConditionRule {
     // "contains" | "not_contains" | "equals" | "not_empty" | "is_true" | "is_false" | "gt_len"
     std::string op = "contains";

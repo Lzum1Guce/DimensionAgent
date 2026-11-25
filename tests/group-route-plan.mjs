@@ -259,6 +259,9 @@ try{
   const blockedRun=(await api('/api/dimension/canvas/runs')).runs.find(r=>r.canvasId===graph.id);
   assert.equal(blockedRun.nodes['bp-lead-final'].iteration,0);
   assert(blockedRun.nodes.job1.output);
+  const independentStart = await app.response('/api/dimension/canvas/runs', {canvasId:graph.id,workspaceDir:project});
+  assert.equal(independentStart.status,409);
+  assert.equal((await api('/api/dimension/work/runs/'+draft.id)).status,'interrupted');
   const kept=(await api('/api/dimension/canvas/library')).canvases.find(g=>g.id===graph.id).nodes.find(n=>n.id===node.id);
   assert(kept.assignmentLocked && kept.model===manual.model);
   console.log('PASS owner review blocks downstream delivery and preserves locked selection and partial output');

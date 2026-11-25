@@ -3391,58 +3391,6 @@ class Application::Impl {
         return "【已获取网页信息】" + url + "\n\n" + body;
     }
 
-    static std::string run_action_command_capture(const std::string& cmd, const fs::path& cwd, int timeout_sec) {
-        if (trim_action_str(cmd).empty()) throw std::runtime_error("请先填写要执行的命令");
-        SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
-        HANDLE rpipe = nullptr, wpipe = nullptr;
-        if (!CreatePipe(&rpipe, &wpipe, &sa, 0)) throw std::runtime_error("创建命令输出管道失败");
-        SetHandleInformation(rpipe, HANDLE_FLAG_INHERIT, 0);
-
-        std::wstring cmdline = L"cmd.exe /c " + utf8_to_wstring_action(cmd);
-        std::vector<wchar_t> mut(cmdline.begin(), cmdline.end());
-        mut.push_back(L'\0');
-        STARTUPINFOW si{}; si.cb = sizeof(si);
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdOutput = wpipe;
-        si.hStdError = wpipe;
-        PROCESS_INFORMATION pi{};
-        const std::wstring cwd_w = cwd.empty() ? std::wstring{} : native_path(cwd).wstring();
-        const BOOL launched = CreateProcessW(
-            nullptr, mut.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-            nullptr, cwd_w.empty() ? nullptr : cwd_w.c_str(), &si, &pi);
-        CloseHandle(wpipe);
-        if (!launched) {
-            CloseHandle(rpipe);
-            throw std::runtime_error("无法启动命令（Win32 错误码 " + std::to_string(GetLastError()) + "）");
-        }
-        std::string out_buf;
-        std::thread reader([&]() {
-            char buf[4096];
-            DWORD got = 0;
-            while (ReadFile(rpipe, buf, sizeof(buf), &got, nullptr) && got > 0) {
-                if (out_buf.size() < 16384) {
-                    const auto take = std::min<std::size_t>(got, 16384 - out_buf.size());
-                    out_buf.append(buf, take);
-                }
-            }
-        });
-        const DWORD wait_rc = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(std::clamp(timeout_sec, 3, 300) * 1000));
-        bool timed_out = false;
-        if (wait_rc == WAIT_TIMEOUT) {
-            timed_out = true;
-            TerminateProcess(pi.hProcess, 124);
-            WaitForSingleObject(pi.hProcess, 2000);
-        }
-        DWORD exit_code = 0;
-        GetExitCodeProcess(pi.hProcess, &exit_code);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        CloseHandle(rpipe);
-        if (reader.joinable()) reader.join();
-        if (timed_out) throw std::runtime_error("命令执行超时（>" + std::to_string(timeout_sec) + "秒）\n" + out_buf);
-        return "【命令执行完成，退出码 " + std::to_string(exit_code) + "】\n" + (out_buf.empty() ? "（无标准输出）" : out_buf);
-    }
-
     std::string canvas_route_issue(const std::string& canvas_id, const CanvasNode& node) {
         if (node.type != "agent") return {};
         const bool cli = node.engine_kind == "cli";
@@ -3571,8 +3519,17 @@ class Application::Impl {
                     out.model_label = "获取网页信息";
                 } else if (node.action_kind == "run_command") {
                     if (on_progress) on_progress("正在运行命令：" + target);
-                    out.output = run_action_command_capture(target, ws_dir, node.action_timeout_sec);
-                    out.ok = true;
+                    const auto result = execute_host_command({ws_dir, target, "cmd", node.action_timeout_sec}, stop);
+                    out.ok = flag(result, "ok");
+                    out.cancelled = flag(result, "cancelled");
+                    const auto status = "退出码 " + std::to_string(static_cast<unsigned long>(num(result, "exitCode")));
+                    out.output = "【命令执行完成，" + status + "】\n" + str(result, "stdout");
+                    const auto errors = str(result, "stderr");
+                    if (!errors.empty()) out.output += "\n" + errors;
+                    if (out.output.size() > 16384)
+                        out.output = canvas_text_prefix(out.output, 16384) + "\n…（命令输出已截断）";
+                    if (!out.ok) out.error = out.cancelled ? "命令已取消" :
+                        flag(result, "timedOut") ? "命令执行超时" : "命令失败：" + status;
                     out.model_label = "运行命令";
                 } else {
                     throw std::runtime_error("未知动作类型：" + node.action_kind);
@@ -10495,6 +10452,8 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
         if (method == "POST") {
             CanvasRunStartRequest sreq;
             sreq.canvas_id = required_string(body, "canvasId");
+            if (sreq.canvas_id.starts_with("grp-bp-run-") || sreq.canvas_id.starts_with("solo-bp-run-"))
+                throw ApiError(409, "请从关联的 Work 任务确认并运行此蓝图");
             sreq.request_id = str(body, "requestId");
             if (sreq.request_id.size() > 128) throw ApiError(400, "请求编号过长");
             sreq.input_text = str(body, "inputText");
@@ -13409,6 +13368,8 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
             std::string cid = str(body, "canvasId");
             if (cid.empty()) cid = str(obj(record, "routePlan"), "blueprintCanvasId");
             if (cid.empty()) throw ApiError(400, "缺少要执行的蓝图编号 canvasId");
+            if (cid != str(obj(record, "routePlan"), "blueprintCanvasId"))
+                throw ApiError(409, "该蓝图与当前 Work 计划不匹配，请刷新计划");
             try {
                 const auto g = canvas_runtime->get_graph(cid);
                 const auto v = validate_canvas_graph(g);

@@ -11,6 +11,13 @@
 #include <stdexcept>
 
 namespace dimension {
+
+std::string canvas_text_prefix(std::string_view text, std::size_t byte_budget) {
+    auto end = std::min(text.size(), byte_budget);
+    while (end && end < text.size() && (static_cast<unsigned char>(text[end]) & 0xc0) == 0x80) --end;
+    return std::string(text.substr(0, end));
+}
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -737,7 +744,7 @@ std::string assemble_canvas_node_context(const CanvasGraph& graph,
             if (n.id == target_node_id || direct_set.contains(n.id)) continue;
             if (const auto it = node_outputs.find(n.id); it != node_outputs.end() && !it->second.empty()) {
                 std::string snippet = it->second;
-                if (snippet.size() > 1200) snippet = snippet.substr(0, 1200) + "…（已按链路预算截断）";
+                if (snippet.size() > 1200) snippet = canvas_text_prefix(snippet, 1200) + "…（已按链路预算截断）";
                 anc << "- [" << (n.title.empty() ? n.id : n.title) << "]：" << snippet << "\n";
             }
         }
@@ -751,7 +758,7 @@ std::string assemble_canvas_node_context(const CanvasGraph& graph,
         out << "【返工重做指令（第 " << iteration << "/" << std::max(1, max_iterations) << " 轮）】\n";
         if (!prev_self_output.empty()) {
             std::string prev_trim = prev_self_output;
-            if (prev_trim.size() > 6000) prev_trim = prev_trim.substr(0, 6000) + "\n…（上一轮输出已截断）";
+            if (prev_trim.size() > 6000) prev_trim = canvas_text_prefix(prev_trim, 6000) + "\n…（上一轮输出已截断）";
             out << "你上一轮的产出：\n" << prev_trim << "\n\n";
         }
         if (!feedback_note.empty()) {
@@ -2057,7 +2064,7 @@ bool CanvasRuntimeService::execute_graph_frame(const std::shared_ptr<RunRecord>&
                     } else {
                         std::string content = node.ref_text;
                         if (!node.force_full_text && static_cast<int>(content.size()) > node.max_inline_chars) {
-                            content = content.substr(0, static_cast<std::size_t>(node.max_inline_chars)) +
+                            content = canvas_text_prefix(content, static_cast<std::size_t>(node.max_inline_chars)) +
                                       "\n\n[资料已按节点预算截断]";
                         }
                         wr.ok = true;

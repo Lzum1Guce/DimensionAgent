@@ -60,37 +60,36 @@ std::wstring utf8_to_wide(std::string_view s) {
     return out;
 }
 
-std::string sanitize_utf8(std::string_view raw, bool& truncated) {
-    std::string out;
-    out.reserve(raw.size());
-    std::size_t i = 0;
-    while (i < raw.size()) {
-        const unsigned char c = static_cast<unsigned char>(raw[i]);
-        if (c < 0x80U) {
-            if (c >= 0x20U || c == '\n' || c == '\r' || c == '\t') out.push_back(static_cast<char>(c));
-            ++i;
-        } else if ((c & 0xE0U) == 0xC0U && i + 1 < raw.size() &&
-                   (static_cast<unsigned char>(raw[i + 1]) & 0xC0U) == 0x80U) {
-            out.append(raw.substr(i, 2));
-            i += 2;
-        } else if ((c & 0xF0U) == 0xE0U && i + 2 < raw.size() &&
-                   (static_cast<unsigned char>(raw[i + 1]) & 0xC0U) == 0x80U &&
-                   (static_cast<unsigned char>(raw[i + 2]) & 0xC0U) == 0x80U) {
-            out.append(raw.substr(i, 3));
-            i += 3;
-        } else if ((c & 0xF8U) == 0xF0U && i + 3 < raw.size() &&
-                   (static_cast<unsigned char>(raw[i + 1]) & 0xC0U) == 0x80U &&
-                   (static_cast<unsigned char>(raw[i + 2]) & 0xC0U) == 0x80U &&
-                   (static_cast<unsigned char>(raw[i + 3]) & 0xC0U) == 0x80U) {
-            out.append(raw.substr(i, 4));
-            i += 4;
-        } else {
-            out += "?";
-            ++i;
+std::string decode_output(std::string_view bytes, bool truncated) {
+    if (bytes.empty()) return {};
+    UINT page = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    auto wide_size = [&] {
+        return MultiByteToWideChar(page, flags, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+    };
+    int count = wide_size();
+    if (!count && truncated) {
+        // A full capture buffer can end partway through a UTF-8 character.
+        const auto original = bytes;
+        for (int tail = 1; !count && tail <= 3 && bytes.size() > 1; ++tail) {
+            bytes.remove_suffix(1);
+            count = wide_size();
         }
+        if (!count) bytes = original;
     }
-    if (truncated) out += "\n...[输出已截断至 128 KiB]";
-    return out;
+    if (!count) {
+        page = GetOEMCP();
+        flags = 0;
+        count = wide_size();
+    }
+    std::wstring wide(count, L'\0');
+    MultiByteToWideChar(page, flags, bytes.data(), static_cast<int>(bytes.size()), wide.data(), count);
+    const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), count, nullptr, 0, nullptr, nullptr);
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), count, result.data(), size, nullptr, nullptr);
+    std::erase_if(result, [](unsigned char c) { return c < 32 && c != '\r' && c != '\n' && c != '\t'; });
+    if (truncated) result += "\n...[输出已截断至 128 KiB]";
+    return result;
 }
 
 bool contains_word_or_prefix(std::string_view low, std::string_view token) {
@@ -275,8 +274,24 @@ Json execute_host_command(const HostExecRequest& request, std::stop_token stop) 
     if (!SetInformationJobObject(job.h, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli)))
         throw std::runtime_error("无法配置 JobObject 进程树清理规则");
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
+    SIZE_T attr_bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_bytes);
+    std::vector<unsigned char> attr_storage(attr_bytes);
+    auto attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_storage.data());
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_bytes))
+        throw std::runtime_error("无法初始化命令管道");
+    struct AttributeGuard {
+        LPPROC_THREAD_ATTRIBUTE_LIST list;
+        ~AttributeGuard() { DeleteProcThreadAttributeList(list); }
+    } attr_guard{attrs};
+    HANDLE inherited[]{in_read.h, out_write.h, err_write.h};
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited,
+                                   sizeof(inherited), nullptr, nullptr))
+        throw std::runtime_error("无法绑定命令管道");
+    STARTUPINFOEXW startup{};
+    startup.lpAttributeList = attrs;
+    auto& si = startup.StartupInfo;
+    si.cb = sizeof(startup);
     si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     si.hStdInput = in_read.h;
@@ -286,10 +301,15 @@ Json execute_host_command(const HostExecRequest& request, std::stop_token stop) 
     std::vector<wchar_t> env_block = build_filtered_environment();
     std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
     mutable_cmd.push_back(L'\0');
-    const std::wstring cwd_w = fs::absolute(request.cwd).lexically_normal().wstring();
+    std::wstring cwd_w = fs::absolute(request.cwd).lexically_normal().wstring();
 
+    if (request.shell == "cmd") {
+        if (cwd_w.starts_with(LR"(\\?\)")) cwd_w.erase(0, 4);
+        if (cwd_w.size() < 3 || cwd_w[1] != L':' || cwd_w[2] != L'\\' || cwd_w.size() >= MAX_PATH)
+            throw std::runtime_error("CMD 工作目录需要使用受支持的本地盘符路径");
+    }
     PROCESS_INFORMATION pi{};
-    const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP;
+    const DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP;
     if (!CreateProcessW(app_path.c_str(), mutable_cmd.data(), nullptr, nullptr, TRUE,
                         flags, env_block.data(), cwd_w.c_str(), &si, &pi)) {
         throw std::runtime_error("启动原生 Windows 子进程失败（错误码 " + std::to_string(GetLastError()) + "）");
@@ -305,7 +325,9 @@ Json execute_host_command(const HostExecRequest& request, std::stop_token stop) 
         TerminateProcess(proc_h.h, 1);
         throw std::runtime_error("无法将子进程绑定至安全托管 JobObject");
     }
-    ResumeThread(thread_h.h);
+    if (stop.stop_requested()) throw std::runtime_error("命令已取消");
+    if (ResumeThread(thread_h.h) == static_cast<DWORD>(-1))
+        throw std::runtime_error("无法启动命令线程");
 
     std::string stdout_raw, stderr_raw;
     bool stdout_trunc = false, stderr_trunc = false;
@@ -348,7 +370,9 @@ Json execute_host_command(const HostExecRequest& request, std::stop_token stop) 
         }
     }
 
-    WaitForSingleObject(proc_h.h, 2000);
+    // The command owns its children even if the shell exits ahead of them.
+    TerminateJobObject(job.h, cancelled ? 130 : timed_out ? 124 : 0);
+    WaitForSingleObject(proc_h.h, INFINITE);
     if (out_reader.joinable()) out_reader.join();
     if (err_reader.joinable()) err_reader.join();
 
@@ -363,8 +387,8 @@ Json execute_host_command(const HostExecRequest& request, std::stop_token stop) 
         {"timedOut", timed_out},
         {"cancelled", cancelled},
         {"durationMs", static_cast<double>(elapsed_ms)},
-        {"stdout", sanitize_utf8(stdout_raw, stdout_trunc)},
-        {"stderr", sanitize_utf8(stderr_raw, stderr_trunc)},
+        {"stdout", decode_output(stdout_raw, stdout_trunc)},
+        {"stderr", decode_output(stderr_raw, stderr_trunc)},
         {"stdoutTruncated", stdout_trunc},
         {"stderrTruncated", stderr_trunc}
     };
