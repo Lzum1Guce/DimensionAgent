@@ -838,7 +838,7 @@ public:
         }
         return result;
     }
-    Json list(const std::string& bot, const std::string& group, std::size_t limit) const {
+    Json list(const std::string& bot, const std::string& group, std::size_t limit, ListView view) const {
         if (!limit || limit > 1000) throw std::invalid_argument("Run list limit must be 1..1000");
         std::unique_lock guard(mutex_);
         std::vector<const Run*> selected;
@@ -851,7 +851,25 @@ public:
             return a->updated != b->updated ? a->updated > b->updated : a->id > b->id;
         });
         Json::Array result;
-        for (std::size_t i = 0; i < selected.size() && i < limit; ++i) result.push_back(brief(*selected[i], true));
+        const auto count = std::min(limit, selected.size());
+        result.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& run = *selected[i];
+            if (view == ListView::Brief) {
+                result.push_back(brief(run, true));
+                continue;
+            }
+            Json row = Json::Object{{"id", run.id}, {"groupId", run.group}, {"createdAt", run.created}};
+            if (view == ListView::Catalog) {
+                row["botId"] = run.bot;
+                row["status"] = run.status;
+                row["updatedAt"] = run.updated;
+                row["text"] = run.inputs.empty() ? "" : short_text(run.inputs.front().text,
+                    options_.list_preview_chars ? options_.list_preview_chars : std::string::npos);
+                row["artifacts"] = run_artifacts(run);
+            }
+            result.push_back(std::move(row));
+        }
         return result;
     }
 
@@ -1128,7 +1146,7 @@ private:
                             {"state", receipt.state}, {"attempt", static_cast<int>(receipt.attempt)},
                             {"readOnly", receipt.read_only}, {"execution", execution_json(receipt.execution)}};
     }
-    Json brief(const Run& run, bool list_view = false) const {
+    Json::Array run_artifacts(const Run& run) const {
         Json::Array artifacts;
         std::set<std::string> seen;
         if (run.hydrated) {
@@ -1143,6 +1161,9 @@ private:
                 if (seen.insert(item).second) artifacts.emplace_back(item);
             }
         }
+        return artifacts;
+    }
+    Json brief(const Run& run, bool list_view = false) const {
         Json latest_decision = Json::Object{{"text", ""}, {"time", ""}, {"inputIndex", 0}};
         if (!run.inputs.empty()) {
             const auto& input = run.inputs.back();
@@ -1168,7 +1189,7 @@ private:
             {"latestDecision", std::move(latest_decision)}, {"unresolvedItems", std::move(unresolved)},
             {"deleted", run.deleted},
             {"inputCount", static_cast<double>(run.inputs.size())}, {"executing", run.executing},
-            {"terminal", terminal(run.status)}, {"artifacts", std::move(artifacts)},
+            {"terminal", terminal(run.status)}, {"artifacts", run_artifacts(run)},
             {"contextUsage", run.context_usage}};
         if (list_view && options_.list_preview_chars) {
             bool shortened = false;
@@ -2019,7 +2040,7 @@ ToolExecution RunService::Impl::resolve_finish(const Run& run, const ToolCall& c
         }
     }
     if (std::any_of(artifacts.begin(), artifacts.end(), [&](const std::string& artifact) { return !verified_artifacts.contains(artifact); })) {
-        return {"completion_rejected: the claimed artifacts or verification are absent from successful executor receipts. Perform and verify the work first.", true};
+        return {"completion_rejected: the claimed artifacts or verification are absent from this attempt's successful receipts. For an existing deliverable, use verify_file on its original workspace path and submit the fresh receipt via evidenceCallIds.", true};
     }
     if (partial != partial_evidence)
         return {partial ? "completion_rejected: partial delivery requires matching partial-delivery executor evidence." :
@@ -2982,7 +3003,7 @@ void RunService::approval_event(const RunExecutionContext& ctx, const std::strin
 void RunService::custom_event(const RunExecutionContext& ctx, const std::string& type, Json data) {
     impl_->custom_event(ctx, type, std::move(data));
 }
-Json RunService::list(const std::string& bot, const std::string& group, std::size_t limit) const { return impl_->list(bot, group, limit); }
+Json RunService::list(const std::string& bot, const std::string& group, std::size_t limit, ListView view) const { return impl_->list(bot, group, limit, view); }
 bool RunService::has_group_activity(const std::string& group) const { return impl_->has_group_activity(group); }
 bool RunService::has_bot_activity(const std::string& bot) const { return impl_->has_bot_activity(bot); }
 Json RunService::group_status(const std::string& group) const { return impl_->group_status(group); }

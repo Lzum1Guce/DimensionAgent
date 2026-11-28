@@ -3,19 +3,19 @@ const MODE_OPTIONS = [
     id: 'auto',
     label: '自动代理',
     badge: '推荐',
-    desc: '自动读取当前电脑的 Windows 系统代理与环境变量，并统一分发给模型接口、联网核实、本机 CLI 与沙盒下载器。',
+    desc: '自动读取 Windows 系统代理、环境变量，并在系统代理关闭（如 TUN 模式）时自动探测本机活跃代理端口，统一分发给模型接口、本机 CLI 与 WSL 沙盒。',
   },
   {
     id: 'global',
     label: '全局代理',
     badge: '',
-    desc: '强制全软件统一走你指定的代理服务器（推荐使用 HTTP 混合代理端口，如 http://127.0.0.1:10808，可同时兼容模型接口与全部 CLI）。',
+    desc: '全软件强制走全局代理：留空地址时将自动识别本机活跃可用代理（支持 v2rayN / Clash / Mihomo 等），也可手动填写或点选下方已识别地址。',
   },
   {
     id: 'none',
     label: '无代理',
     badge: '',
-    desc: '强制全软件直连，主动忽略电脑系统代理并清空子进程代理环境变量。',
+    desc: '强制全软件直连，主动忽略电脑系统代理、本机代理探测与子进程环境变量。',
   },
 ];
 
@@ -24,7 +24,8 @@ const SOURCE_LABELS = {
   'windows-registry': 'Windows 注册表代理',
   'windows-pac': 'Windows PAC 自动配置脚本',
   environment: '系统环境变量',
-  none: '未开启系统代理',
+  'local-probe': '本机活跃代理（自动识别）',
+  none: '未检测到可用代理',
 };
 
 function ensureProxyStyles() {
@@ -64,6 +65,10 @@ function ensureProxyStyles() {
     .np-status.is-error { color: #cf3636; }
     .np-status.is-ok { color: #2b7a4b; }
     .np-hint { font-size: 12px; color: var(--muted, #6b7280); line-height: 1.55; margin: 0; }
+    .np-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+    .np-chip { border: 1px solid var(--border, rgba(0,0,0,.15)); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--surface, #fff); color: inherit; cursor: pointer; }
+    .np-chip:hover { border-color: var(--accent, #c4623f); color: var(--accent, #c4623f); }
+    .np-chip.is-active { border-color: var(--accent, #c4623f); background: var(--accent-soft, rgba(196,98,63,.1)); color: var(--accent, #c4623f); font-weight: 600; }
   `;
   document.head.appendChild(style);
 }
@@ -75,6 +80,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
   const state = {
     loading: false,
     saving: false,
+    dirty: false,
     settings: {
       mode: 'auto',
       proxyUrl: '',
@@ -96,6 +102,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
     const sys = state.systemProxy || {};
     const eff = state.effective || {};
     const curMode = state.settings.mode || 'auto';
+    const busy = state.loading || state.saving;
     const activeOpt = MODE_OPTIONS.find((m) => m.id === curMode) || MODE_OPTIONS[0];
 
     root.innerHTML = '';
@@ -141,11 +148,35 @@ export function bindNetworkProxySettings({ api, host } = {}) {
       vd.textContent = v;
       grid.append(kd, vd);
     };
-    addRow('系统来源', SOURCE_LABELS[sys.source] || '未检测到', true);
-    addRow('电脑代理地址', sys.proxyUrl || (sys.autoConfigUrl ? `PAC: ${sys.autoConfigUrl}` : '无'));
+    addRow('识别来源', SOURCE_LABELS[sys.source] || '未检测到', true);
+    addRow('识别代理地址', sys.proxyUrl || (sys.autoConfigUrl ? `PAC: ${sys.autoConfigUrl}` : '无'));
     addRow('当前软件生效', eff.summary || '正在读取…', true);
     if (eff.sandboxProxyUrl) {
       addRow('WSL 沙盒同步', eff.sandboxProxyUrl);
+    }
+    const detectedList = Array.isArray(sys.detectedLocalProxies) ? sys.detectedLocalProxies : [];
+    if (detectedList.length) {
+      const kd = document.createElement('div');
+      kd.className = 'np-sys-k';
+      kd.textContent = '本机可用代理';
+      const chips = document.createElement('div');
+      chips.className = 'np-chips';
+      for (const candidateUrl of detectedList) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.disabled = busy;
+        chip.className = `np-chip${eff.activeProxyUrl === candidateUrl ? ' is-active' : ''}`;
+        chip.textContent = candidateUrl;
+        chip.title = '点击立即使用该代理作为全局代理';
+        chip.addEventListener('click', () => {
+          if (state.saving) return;
+          state.settings.mode = 'global';
+          state.settings.proxyUrl = candidateUrl;
+          void save();
+        });
+        chips.append(chip);
+      }
+      grid.append(kd, chips);
     }
     sysCard.append(grid);
     root.append(sysCard);
@@ -169,6 +200,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
     for (const opt of MODE_OPTIONS) {
       const btn = document.createElement('button');
       btn.type = 'button';
+      btn.disabled = busy;
       btn.className = `np-mode-btn${curMode === opt.id ? ' is-active' : ''}`;
       btn.setAttribute('role', 'radio');
       btn.setAttribute('aria-checked', curMode === opt.id ? 'true' : 'false');
@@ -185,17 +217,11 @@ export function bindNetworkProxySettings({ api, host } = {}) {
       btn.addEventListener('click', () => {
         if (state.saving) return;
         state.settings.mode = opt.id;
-        // When switching to global with empty URL, prefill detected OS proxy for convenience.
-        if (opt.id === 'global' && !state.settings.proxyUrl && sys.proxyUrl) {
-          state.settings.proxyUrl = sys.proxyUrl;
-        }
         state.notice = '';
         state.noticeKind = '';
         render();
-        // Auto-save immediately on one-click switch to auto / none for frictionless UX.
-        if (opt.id === 'auto' || opt.id === 'none') {
-          void save();
-        }
+        // Auto-save immediately on one-click switch (global with empty URL auto-detects active local proxy).
+        void save();
       });
       modesWrap.append(btn);
     }
@@ -212,35 +238,38 @@ export function bindNetworkProxySettings({ api, host } = {}) {
       urlField.className = 'np-field';
       const urlLabel = document.createElement('label');
       urlLabel.setAttribute('for', 'npProxyUrlInput');
-      urlLabel.textContent = '全局代理地址';
+      urlLabel.textContent = '全局代理地址（留空则自动识别本机可用代理）';
       const urlRow = document.createElement('div');
       urlRow.className = 'np-input-row';
       const urlInput = document.createElement('input');
       urlInput.id = 'npProxyUrlInput';
       urlInput.type = 'text';
+      urlInput.disabled = busy;
       urlInput.className = 'np-input';
-      urlInput.placeholder = '例如 http://127.0.0.1:10808 或 http://192.168.1.5:7890';
+      urlInput.placeholder = sys.proxyUrl
+        ? `留空自动使用：${sys.proxyUrl}`
+        : '留空自动识别，或手动填写如 http://127.0.0.1:10808';
       urlInput.value = state.settings.proxyUrl || '';
       urlInput.addEventListener('input', () => {
         state.settings.proxyUrl = urlInput.value;
+        state.dirty = true;
       });
       urlInput.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter') { ev.preventDefault(); void save(); }
       });
       urlRow.append(urlInput);
 
-      if (sys.proxyUrl) {
-        const fillBtn = document.createElement('button');
-        fillBtn.type = 'button';
-        fillBtn.className = 'np-btn';
-        fillBtn.textContent = '填入电脑代理';
-        fillBtn.addEventListener('click', () => {
-          state.settings.proxyUrl = sys.proxyUrl;
-          urlInput.value = sys.proxyUrl;
-          urlInput.focus();
-        });
-        urlRow.append(fillBtn);
-      }
+      const autoDetectBtn = document.createElement('button');
+      autoDetectBtn.type = 'button';
+      autoDetectBtn.className = 'np-btn';
+      autoDetectBtn.textContent = '自动识别可用代理';
+      autoDetectBtn.disabled = state.loading || state.saving;
+      autoDetectBtn.addEventListener('click', () => {
+        state.settings.proxyUrl = '';
+        urlInput.value = '';
+        void save();
+      });
+      urlRow.append(autoDetectBtn);
       urlField.append(urlLabel, urlRow);
       cfgCard.append(urlField);
     }
@@ -255,11 +284,13 @@ export function bindNetworkProxySettings({ api, host } = {}) {
       const bypassInput = document.createElement('input');
       bypassInput.id = 'npBypassInput';
       bypassInput.type = 'text';
+      bypassInput.disabled = busy;
       bypassInput.className = 'np-input';
       bypassInput.placeholder = 'localhost,127.0.0.1,::1,*.internal';
       bypassInput.value = state.settings.bypass || 'localhost,127.0.0.1,::1';
       bypassInput.addEventListener('input', () => {
         state.settings.bypass = bypassInput.value;
+        state.dirty = true;
       });
       bypassField.append(bypassLabel, bypassInput);
       cfgCard.append(bypassField);
@@ -268,11 +299,13 @@ export function bindNetworkProxySettings({ api, host } = {}) {
       sbCheck.className = 'cs-check';
       const sbInput = document.createElement('input');
       sbInput.type = 'checkbox';
+      sbInput.disabled = busy;
       sbInput.checked = state.settings.applyToSandbox !== false;
       sbInput.addEventListener('change', () => {
         state.settings.applyToSandbox = sbInput.checked;
+        state.dirty = true;
       });
-      sbCheck.append(sbInput, document.createTextNode(' 允许向 WSL 隔离沙盒透传局域网/非本机代理（本机 127.0.0.1 代理在 NAT 沙盒下自动保护跳过，但下载安装包自动走宿主机高速通道）'));
+      sbCheck.append(sbInput, document.createTextNode(' 自动同步代理至 WSL 隔离沙盒与登录终端（本机 127.0.0.1 代理将通过内置透明隧道桥自动穿透 NAT，无需改动防火墙或重启 WSL）'));
       cfgCard.append(sbCheck);
     }
 
@@ -303,6 +336,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
   };
 
   const load = async (announce = false) => {
+    if (state.loading || state.saving) return;
     state.loading = true;
     if (announce) {
       state.notice = '正在重新读取电脑系统代理…';
@@ -311,7 +345,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
     render();
     try {
       const data = await api('/api/dimension/network-proxy');
-      if (data?.settings) {
+      if (data?.settings && !state.dirty) {
         state.settings = {
           mode: data.settings.mode || 'auto',
           proxyUrl: data.settings.proxyUrl || '',
@@ -335,6 +369,8 @@ export function bindNetworkProxySettings({ api, host } = {}) {
   };
 
   const save = async () => {
+    if (state.saving || state.loading) return;
+    state.dirty = true;
     state.saving = true;
     state.notice = '正在应用全局代理设置…';
     state.noticeKind = '';
@@ -358,6 +394,7 @@ export function bindNetworkProxySettings({ api, host } = {}) {
         };
       }
       state.systemProxy = data?.systemProxy || state.systemProxy;
+      state.dirty = false;
       state.effective = data?.effective || state.effective;
       state.notice = `已生效：${state.effective?.summary || '代理配置已更新'}`;
       state.noticeKind = 'ok';

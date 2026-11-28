@@ -214,8 +214,9 @@ public:
     // Appends a live sub-step event (e.g. native CLI stream step, broker enrichment, or member whisper)
     // to an active run attempt without altering scheduling state.
     void custom_event(const RunExecutionContext&, const std::string& type, Json data);
+    enum class ListView { Brief, Catalog, SessionIndex };
     Json list(const std::string& bot_id = {}, const std::string& group_id = {},
-              std::size_t limit = 100) const;
+              std::size_t limit = 100, ListView view = ListView::Brief) const;
     // Exact group match across all runs, including queued work and a callback
     // still unwinding after terminal status. Independent of history page caps.
     bool has_group_activity(const std::string& group_id) const;

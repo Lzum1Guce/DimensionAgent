@@ -24,6 +24,7 @@ bool pending(JobState state) noexcept {
 struct Graph {
     std::vector<std::vector<std::size_t>> prerequisites;
     std::vector<std::size_t> downstream_length;
+    std::vector<std::size_t> order;
 };
 
 Graph validate(const std::vector<Job>& jobs, std::size_t max_parallel) {
@@ -46,7 +47,7 @@ Graph validate(const std::vector<Job>& jobs, std::size_t max_parallel) {
     }
 
     Graph graph{std::vector<std::vector<std::size_t>>(count),
-                std::vector<std::size_t>(count, 0)};
+                std::vector<std::size_t>(count, 0), {}};
     std::vector<std::vector<std::size_t>> successors(count);
     std::vector<std::size_t> remaining(count, 0);
     for (std::size_t i = 0; i < count; ++i) {
@@ -69,7 +70,7 @@ Graph validate(const std::vector<Job>& jobs, std::size_t max_parallel) {
         }
     }
 
-    std::vector<std::size_t> order;
+    auto& order = graph.order;
     order.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         if (remaining[i] == 0) {
@@ -103,6 +104,10 @@ struct StopBeforeJoin {
 };
 
 } // namespace
+
+std::vector<std::size_t> job_dependency_order(const std::vector<Job>& jobs) {
+    return validate(jobs, 1).order;
+}
 
 const char* job_state_name(JobState state) noexcept {
     switch (state) {

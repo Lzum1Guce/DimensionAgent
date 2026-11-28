@@ -3,6 +3,7 @@
 #include "dimension/json.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,16 +37,17 @@ struct NetworkProxySettings {
     static NetworkProxySettings from_json(const Json& j);
 };
 
-// Snapshot of the computer's OS proxy configuration (Windows Internet Settings / WinHTTP / Env).
+// Snapshot of the computer's OS proxy configuration (Windows Internet Settings / WinHTTP / Env / Local probe).
 struct SystemProxyInfo {
     bool enabled = false;
     bool auto_detect = false;
     std::string auto_config_url; // PAC URL if configured
-    std::string source;          // "windows-registry" | "winhttp-ie" | "environment" | "none"
+    std::string source;          // "windows-system" | "windows-registry" | "windows-pac" | "environment" | "local-probe" | "none"
     std::string proxy_url;       // Primary normalized URL (e.g. "http://127.0.0.1:10808")
     std::string http_proxy;
     std::string https_proxy;
     std::string bypass;
+    std::vector<std::string> detected_local_proxies; // Active local proxies verified by HTTP CONNECT / SOCKS5 handshake
 
     Json to_json() const;
 };
@@ -85,8 +87,14 @@ std::string to_winhttp_proxy_spec(std::string_view normalized_url);
 // Returns true if the URL host refers to localhost / 127.0.0.1 / ::1 (unreachable directly from WSL2 NAT).
 bool is_loopback_proxy_url(std::string_view normalized_url);
 
-// Probes the computer's current OS proxy settings (Windows Internet Settings registry, WinHTTP IE config, env fallback).
-SystemProxyInfo detect_system_proxy_info();
+// Concurrently probes localhost candidate proxy ports (priority_urls first, then common desktop proxy ports)
+// using fast protocol-level HTTP CONNECT and SOCKS5 handshakes so non-proxy web servers are never misidentified.
+std::vector<std::string> probe_active_local_proxies(const std::vector<std::string>& priority_urls = {},
+                                                    bool force_refresh = false);
+
+// Probes the computer's current OS proxy settings (Windows Internet Settings registry, WinHTTP IE config,
+// env fallback, and active local proxy auto-detection).
+SystemProxyInfo detect_system_proxy_info(bool force_probe = false);
 
 // Pure resolver (testable without touching global state or real registry).
 ResolvedNetworkProxy resolve_network_proxy(const NetworkProxySettings& settings,
@@ -98,8 +106,18 @@ ResolvedNetworkProxy resolve_active_network_proxy();
 std::uint64_t network_proxy_generation();
 
 // Applies new global proxy settings, increments generation (triggering WinHTTP session hot-reload),
-// and synchronizes the current process's HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY environment variables.
-ResolvedNetworkProxy apply_network_proxy_settings(const NetworkProxySettings& settings);
+// synchronizes the current process's HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY environment variables,
+// and ensures/stops the built-in WSL loopback proxy bridge as needed.
+ResolvedNetworkProxy apply_network_proxy_settings(const NetworkProxySettings& settings,
+                                                  bool force_probe = false);
+
+// Registers the WSL executable & sandbox distribution so loopback host proxies (e.g. 127.0.0.1:10808)
+// are transparently bridged into WSL2 NAT via a stdio-multiplexed tunnel without firewall/Allow-LAN changes.
+void configure_network_proxy_sandbox(const std::filesystem::path& wsl_executable,
+                                     const std::string& sandbox_distribution);
+
+// Cleanly stops the built-in WSL proxy bridge (called on application shutdown; also covered by static destructor).
+void shutdown_network_proxy_bridge();
 
 // Builds environment variable overrides for child host CLI processes.
 // When mode == "none" (or no proxy active), entries carry empty values so build_environment_block removes/clears them.
@@ -109,8 +127,29 @@ std::vector<std::pair<std::string, std::string>> build_host_proxy_env_overrides(
 std::vector<std::pair<std::string, std::string>> build_sandbox_proxy_env_overrides();
 
 #ifdef _WIN32
-// Opens a WinHTTP session configured according to the currently active global/auto/none proxy policy.
+// Opens a WinHTTP session configured according to the currently active global/auto/none proxy policy
+// (or a thread-local per-Bot pinned proxy override when executing on behalf of an Isolated Bot Pool member).
 HINTERNET open_configured_winhttp_session(const wchar_t* user_agent, DWORD flags);
 #endif
+
+// Thread-local RAII proxy override for Isolated Bot Pool HTTP requests (e.g., model API calls).
+// Never touches global proxy state; non-isolated Bots never activate this guard.
+class ScopedBotProxyOverride {
+public:
+    ScopedBotProxyOverride(bool active,
+                           std::string egress_mode,
+                           std::string proxy_url,
+                           bool fail_closed = true);
+    ~ScopedBotProxyOverride();
+    ScopedBotProxyOverride(const ScopedBotProxyOverride&) = delete;
+    ScopedBotProxyOverride& operator=(const ScopedBotProxyOverride&) = delete;
+
+private:
+    bool active_ = false;
+    bool prev_active_ = false;
+    std::string prev_mode_;
+    std::string prev_url_;
+    bool prev_fail_closed_ = true;
+};
 
 } // namespace dimension

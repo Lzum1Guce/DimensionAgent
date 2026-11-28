@@ -77,6 +77,7 @@ struct CanvasNode {
     std::string gate_mode = "approval";
     std::string pass_keyword = "PASS";
     std::string fail_keyword = "FAIL";
+    bool require_pass = false;
     int max_iterations = 3;              // Circuit breaker fuse (1..20)
     std::string approval_hint;
     std::string bool_source = "auto";    // "auto" (read upstream truthiness) | "fixed" (manual true/false switch)

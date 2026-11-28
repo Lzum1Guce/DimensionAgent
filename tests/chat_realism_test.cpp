@@ -230,7 +230,7 @@ int main() {
     assert(alt_parsed.node_title == "门缝递出的旧证");
     assert(alt_parsed.choices.size() == 3);
     assert(alt_parsed.choices[0].id == "A" && alt_parsed.choices[2].id == "C");
-    assert(cast_nar_p.find("本幕必须输出") != std::string::npos);
+    assert(cast_nar_p.find("仅在需要玩家决定时使用") != std::string::npos);
     ++checks;
 
     // 19. Story Theater v3: Story Bible, Secret Notes, Inner Voice, Dice, Stage Cue & Finale Ending

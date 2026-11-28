@@ -129,12 +129,14 @@ export function bindWorkModels({ api }) {
     status.textContent = '已加入待保存的模型池。';
   };
   const load = async refresh => {
-    const draft = refresh && loaded ? draftSettings() : null;
-    const ticket = ++version; busy = true; loaded = false; lock(); status.textContent = '正在读取可用模型…';
+    const keepEditing = refresh && loaded;
+    const ticket = ++version; busy = !keepEditing; lock(); status.textContent = '正在读取可用模型…';
     try {
       const data = await api(`/api/dimension/work-models${refresh ? '?refresh=1' : ''}`);
       if (ticket !== version || !dialog.open) return;
-      paint(draft ? { ...data, settings: draft } : data); loaded = true;
+      const editingEngine = keepEditing && form.elements.nativeEngine.value;
+      paint(keepEditing ? { ...data, settings: draftSettings() } : data); loaded = true;
+      if (editingEngine && data.cliEngines?.some(e => e.id === editingEngine)) form.elements.nativeEngine.value = editingEngine;
       const issues = (data.catalogs || []).filter(catalog => catalog.error);
       status.textContent = issues.length ? issues.slice(0, 3).map(catalog => `${catalog.providerId}：${catalog.error}`).join('；') :
         (models.length || data.cliModels?.length) ? (refresh ? '模型目录已刷新。' : '') : '请先在模型设置中连接一个可用模型。';
@@ -143,7 +145,7 @@ export function bindWorkModels({ api }) {
   };
   trigger.addEventListener('click', () => { if (!dialog.open) { dialog.showModal(); void load(false); } });
   dialog.querySelector('.wm-close').onclick = () => dialog.close();
-  dialog.onclose = () => { version++; busy = false; };
+  dialog.onclose = () => { version++; busy = false; loaded = false; };
   dialog.querySelector('.wm-refresh').onclick = () => void load(true);
   form.onsubmit = async event => {
     event.preventDefault(); if (busy || !loaded) return;

@@ -53,7 +53,8 @@ const server=http.createServer(async(req,res)=>{
   const picking=body.messages.some(m=>m.role==='system' && m.content?.startsWith('你负责模型分配'));
   const review=body.messages.some(m=>m.role==='system' && m.content?.startsWith('你是群主，审查刚刚交付'));
   const blocked=review && body.messages.some(m=>m.content?.includes('BLOCK_REVIEW'));
-  const delta=review?{content:JSON.stringify({pass:!blocked,reason:blocked?'缺少浏览器验收':'已检查文本交付'})}:picking?{content:JSON.stringify(args)}:lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:soloCommander&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'solo-cli-'+(++counter),type:'function',function:{name:'dispatch_native_cli',arguments:JSON.stringify({task:'按已确认计划实现并验证节日插件'})}}]}:{content:body.tools?.length?'已处理。':'先确定节日内容，再实现并测试。是否按此计划开始执行？'};
+  const fencedReview = '审查结论如下：\n```json\n' + JSON.stringify({pass:!blocked,reason:blocked?'缺少浏览器验收':'已检查文本交付'}) + '\n```';
+  const delta=review?{content:fencedReview}:picking?{content:JSON.stringify(args)}:lead&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'dispatch'+(++counter),type:'function',function:{name:tool,arguments:JSON.stringify(args)}}]}:soloCommander&&!body.messages.some(m=>m.role==='tool')?{tool_calls:[{index:0,id:'solo-cli-'+(++counter),type:'function',function:{name:'dispatch_native_cli',arguments:JSON.stringify({task:'按已确认计划实现并验证节日插件'})}}]}:{content:body.tools?.length?'已处理。':'先确定节日内容，再实现并测试。是否按此计划开始执行？'};
   res.writeHead(200,{'Content-Type':'text/event-stream'});
   res.end('data: '+JSON.stringify({choices:[{index:0,delta,finish_reason:delta.tool_calls?'tool_calls':'stop'}]})+'\n\ndata: [DONE]\n\n');
 });
@@ -231,10 +232,23 @@ try{
   await api('/api/dimension/canvas/save',graph);
   const start='/api/dimension/work/runs/'+draft.id+'/execute-blueprint';
   await assert.rejects(api(start,{canvasId:graph.id,requestId:'invalid-capability'}));
+  const packed = await api('/api/dimension/canvas/collapse',{
+    canvasId:graph.id,nodeIds:[node.id],name:'成员交付',description:'保留工作区能力要求'
+  });
+  assert(packed.function.nodes.some(n=>n.id===node.id && n.requiresWorkspace));
+  const nested = await app.response(start,{canvasId:graph.id,requestId:'invalid-nested-capability'});
+  assert.equal(nested.status,409,nested.text);
+  assert(nested.text.includes('成员交付') && nested.text.includes('CLI'),nested.text);
+  console.log('PASS nested function capabilities checked before group blueprint execution');
   node.requiresWorkspace=false;
+  // User manual override to an outside-pool model is now explicitly allowed in DimensionImage blueprints!
   node.model='off-pool';
   await api('/api/dimension/canvas/save',graph);
-  await assert.rejects(api(start,{canvasId:graph.id,requestId:'invalid-model'}));
+  const offPoolOffset=calls.length;
+  await api(start,{canvasId:graph.id,requestId:'off-pool-allowed'});
+  const offPoolDone=await settled(draft.id);
+  assert.equal(offPoolDone.status,'completed',JSON.stringify(offPoolDone.events).slice(-1500));
+  assert(calls.slice(offPoolOffset).some(call=>call.body.model==='off-pool'), 'Blueprint must execute user-selected outside-pool model');
   node.model=manual.model;
   await api('/api/dimension/canvas/save',graph);
   const offset=calls.length;

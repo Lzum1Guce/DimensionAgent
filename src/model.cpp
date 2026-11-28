@@ -389,11 +389,20 @@ std::string request_body(const ModelConfig& config,
     Json::Object body{{"model", config.model}, {"stream", true},
         {responses ? "input" : "messages", std::move(input)},
         {responses ? "max_output_tokens" : "max_tokens", config.max_output_tokens}};
+    if (responses && !config.reasoning_effort.empty()) {
+        body.emplace("reasoning", Json::Object{{"effort", config.reasoning_effort}});
+    }
     if (!responses) {
         body.emplace("stream_options", Json::Object{{"include_usage", true}});
         if (config.thinking_enabled)
             body.emplace("thinking", Json::Object{{"type", *config.thinking_enabled ? "enabled" : "disabled"}});
-        if (!config.reasoning_effort.empty()) body.emplace("reasoning_effort", config.reasoning_effort);
+        if (!config.reasoning_effort.empty()) {
+            const std::string api_eff =
+                (config.reasoning_effort == "xhigh" || config.reasoning_effort == "max")
+                    ? std::string("high")
+                    : config.reasoning_effort;
+            body.emplace("reasoning_effort", api_eff);
+        }
     }
     if (config.temperature) body.emplace("temperature", *config.temperature);
     if (!tools.empty()) {

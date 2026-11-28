@@ -74,7 +74,11 @@ void validation_happens_before_callbacks() {
     };
     for (const auto& jobs : invalid_plans) {
         expect_invalid([&] { execute_plan(jobs, worker, event); });
+        expect_invalid([&] { dimension::job_dependency_order(jobs); });
     }
+    const std::vector<Job> reversed{{"review","a",{"draft"}},{"draft","b",{"research"}},{"research","c",{}}};
+    const std::vector<std::size_t> expected{2, 1, 0};
+    CHECK(dimension::job_dependency_order(reversed) == expected);
     std::vector<Job> too_many;
     for (std::size_t i = 0; i <= max_plan_jobs; ++i) {
         too_many.push_back({std::to_string(i), "bot", {}});

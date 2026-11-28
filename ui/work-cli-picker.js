@@ -1,22 +1,17 @@
+import { apiEffortLevels, arrangeModels, effortLevels, modelChoice } from './model-catalog-view.js';
+import { cliOptions } from './cli-engine-catalog.js';
+
 // Dual-Pane Split Popover Picker for Work Execution Engines & Models (API + Native Subscription)
 
 const FAVORITES_STORAGE_KEY = 'dimension.workCliPicker.favorites.v1';
 
+const SHORT_LABELS = { antigravity: 'Antigravity', 'deepseek-harness': 'DeepSeek', 'gemini-cli': 'Gemini' };
 const HARNESS_CATALOG = [
-  { id: 'auto', label: '自动调度', shortLabel: '自动', selectableModels: true },
-  { id: 'antigravity', label: 'Antigravity (agy)', shortLabel: 'Antigravity', selectableModels: true },
-  { id: 'hermes', label: 'Hermes', shortLabel: 'Hermes', selectableModels: true },
-  { id: 'deepseek-harness', label: 'DeepSeek Harness', shortLabel: 'DeepSeek', selectableModels: true },
-  { id: 'kimi-code', label: 'Kimi Code', shortLabel: 'Kimi Code', selectableModels: true },
-  { id: 'claude-code', label: 'Claude Code', shortLabel: 'Claude Code', selectableModels: true },
-  { id: 'codex', label: 'Codex', shortLabel: 'Codex', selectableModels: true },
-  { id: 'opencode', label: 'OpenCode', shortLabel: 'OpenCode', selectableModels: true },
-  { id: 'qwen-code', label: 'Qwen Code', shortLabel: 'Qwen Code', selectableModels: true },
-  { id: 'gemini-cli', label: 'Gemini CLI', shortLabel: 'Gemini', selectableModels: true },
-  { id: 'builtin', label: '内置轻量', shortLabel: '内置轻量', selectableModels: false },
+  { id: 'auto', label: '自动调度', shortLabel: '自动' },
+  ...cliOptions(['antigravity', 'hermes', 'deepseek-harness', 'kimi-code', 'claude-code', 'codex', 'opencode', 'qwen-code', 'gemini-cli'])
+    .map(engine => ({ ...engine, shortLabel: SHORT_LABELS[engine.id] || engine.label })),
+  { id: 'builtin', label: '内置轻量', shortLabel: '内置轻量' },
 ];
-
-const EFFORT_CYCLE = ['', 'low', 'medium', 'high'];
 
 // Fallback install guidance for engines the backend did not describe.
 const INSTALL_GUIDE = {
@@ -33,17 +28,6 @@ const INSTALL_GUIDE = {
   'deepseek-harness': { note: '请安装 DeepSeek Harness 桌面端或运行 npm install -g @deepseek-ai/dsh。' },
   hermes: { note: '请参考 Hermes 官方文档完成安装，并确认命令行可直接运行。' },
 };
-const EFFORT_BADGE = {
-  low: 'LOW',
-  medium: 'MED',
-  high: 'HIGH',
-};
-const EFFORT_LABEL = {
-  low: 'Low',
-  medium: 'Med',
-  high: 'High',
-};
-
 function readFavorites() {
   try {
     const raw = JSON.parse(localStorage.getItem(FAVORITES_STORAGE_KEY) || '[]');
@@ -85,13 +69,6 @@ function svgGear() {
   return `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.9v1.5M8 12.6v1.5M1.9 8h1.5M12.6 8h1.5M3.7 3.7l1.05 1.05M11.25 11.25l1.05 1.05M12.3 3.7l-1.05 1.05M4.75 11.25 3.7 12.3"/></svg>`;
 }
 
-function inferDefaultEffortBadge(modelName) {
-  const low = String(modelName || '').toLowerCase();
-  if (/flash|mini|lite|haiku|turbo|fast/.test(low)) return 'LOW';
-  if (/opus|pro|reasoner|r1|o1|o3|thinking|max/.test(low)) return 'HIGH';
-  return '';
-}
-
 function prettifyModelShort(modelId) {
   const raw = String(modelId || '').trim();
   if (!raw) return '';
@@ -119,13 +96,7 @@ export function createWorkCliPicker(opts = {}) {
   triggerCaret.innerHTML = svgChevronDownSmall();
   triggerBtn.append(triggerLabel, triggerCaret);
 
-  const effortQuickBtn = document.createElement('button');
-  effortQuickBtn.type = 'button';
-  effortQuickBtn.className = 'hcp-effort-quick';
-  effortQuickBtn.title = '点击切换推理强度 (Auto / Low / Med / High)';
-  effortQuickBtn.hidden = true;
-
-  wrap.append(triggerBtn, effortQuickBtn);
+  wrap.append(triggerBtn);
 
   // Floating Dual-Pane Popover Panel
   const popover = document.createElement('div');
@@ -314,19 +285,13 @@ export function createWorkCliPicker(opts = {}) {
     if (activeEng === 'builtin') {
       const leadSummary = formatWorkLeadSummary(settings, harnesses);
       triggerLabel.textContent = leadSummary ? `内置轻量 · ${leadSummary}` : '内置轻量';
-      const wl = getWorkLeadConfig(settings);
-      if (wl.mode === 'cli') {
-        effortQuickBtn.hidden = false;
-        effortQuickBtn.textContent = EFFORT_LABEL[wl.reasoningEffort] || 'Auto';
-        effortQuickBtn.dataset.effort = wl.reasoningEffort || 'auto';
-      } else {
-        effortQuickBtn.hidden = true;
-      }
       return;
     }
 
     const cfg = getEngineConfig(settings, activeEng);
-    const effectiveSrc = cfg.modelSource || settings.cliModelSource || 'work';
+    const effectiveSrc = targetDesc?.supportsCustomModel === false
+      ? 'native'
+      : (cfg.modelSource || settings.cliModelSource || 'work');
     const baseName = activeEng === 'auto'
       ? `自动 (${autoTargetMeta ? autoTargetMeta.shortLabel : 'Hermes'})`
       : metaItem.shortLabel;
@@ -351,10 +316,6 @@ export function createWorkCliPicker(opts = {}) {
       ? `接待指挥（谈需求/验收）：${leadSummary} → 实干执行 CLI：${workerLabel}`
       : `实干执行 CLI：${workerLabel}`;
 
-    const eff = cfg.reasoningEffort || '';
-    effortQuickBtn.hidden = false;
-    effortQuickBtn.textContent = EFFORT_LABEL[eff] || 'Auto';
-    effortQuickBtn.dataset.effort = eff || 'auto';
   };
 
   const renderModelItemRow = ({
@@ -364,7 +325,7 @@ export function createWorkCliPicker(opts = {}) {
     isSelected,
     effortValue,
     onSelect,
-    onCycleEffort,
+    modelId, scope, engine,
   }) => {
     const isFav = Boolean(favKey && favorites.has(favKey));
     const row = document.createElement('div');
@@ -395,20 +356,6 @@ export function createWorkCliPicker(opts = {}) {
     const rightBox = document.createElement('span');
     rightBox.className = 'hcp-row-right';
 
-    const badgeText = EFFORT_BADGE[effortValue] || inferDefaultEffortBadge(displayName);
-    if (badgeText && onCycleEffort) {
-      const effBtn = document.createElement('button');
-      effBtn.type = 'button';
-      effBtn.className = `hcp-tier-badge is-clickable${effortValue ? ' is-explicit' : ''}`;
-      effBtn.textContent = badgeText;
-      effBtn.title = '点击切换推理强度 (LOW / MED / HIGH)';
-      effBtn.addEventListener('click', ev => {
-        ev.stopPropagation();
-        onCycleEffort();
-      });
-      rightBox.append(effBtn);
-    }
-
     if (isSelected) {
       const chk = document.createElement('span');
       chk.innerHTML = svgCheck();
@@ -420,6 +367,18 @@ export function createWorkCliPicker(opts = {}) {
       ev.stopPropagation();
       onSelect();
     });
+    if (modelId) {
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      row.onkeydown = event => {
+        if (event.target === row && ['Enter', ' '].includes(event.key)) {
+          event.preventDefault();
+          row.click();
+        }
+      };
+      modelChoice(row, {id:modelId, scope, engine, levels:engine ? effortLevels(engine) : apiEffortLevels(modelId), effort:effortValue,
+        selected:isSelected, favorite:isFav, apply:onSelect});
+    }
     return row;
   };
 
@@ -602,19 +561,15 @@ export function createWorkCliPicker(opts = {}) {
               emitChange(payload);
             };
             rightList.append(renderModelItemRow({
+              modelId:entry.modelId, engine:cliItem.id, scope:JSON.stringify(['cli', cliItem.id, entry.providerArg]),
               favKey: entry.isDefault ? '' : `lead-cli:${cliItem.id}:${entry.providerArg}:${entry.modelId}`,
               displayName: entry.displayName,
               tooltip: entry.tooltip,
               isSelected: isCur,
               effortValue: isCur ? wl.reasoningEffort : '',
-              onSelect: () => {
-                selectLeadCli();
+              onSelect: effort => {
+                selectLeadCli(effort);
                 closePopover();
-              },
-              onCycleEffort: () => {
-                const curIdx = EFFORT_CYCLE.indexOf(isCur ? (wl.reasoningEffort || '') : '');
-                const nextEff = EFFORT_CYCLE[(curIdx + 1) % EFFORT_CYCLE.length];
-                selectLeadCli(nextEff);
               },
             }));
           }
@@ -655,18 +610,19 @@ export function createWorkCliPicker(opts = {}) {
         for (const modelId of models) {
           const isCur = wl.mode === 'api' && leadSel.providerId === provId && leadSel.model === modelId;
           rightList.append(renderModelItemRow({
+            modelId, scope:JSON.stringify(['api', provId]),
             favKey: `model:${provId}:${modelId}`,
             displayName: prettifyModelShort(modelId),
             tooltip: `${provId} / ${modelId}`,
             isSelected: isCur,
-            effortValue: '',
-            onSelect: () => {
+            effortValue: isCur ? leadSel.reasoningEffort : '',
+            onSelect: (effort = '') => {
               const patch = {};
               if (wl.mode !== 'api') patch.workLead = { mode: 'api' };
               if (engineItem.id === 'builtin' && activeEng !== 'builtin') patch.cliEngine = 'builtin';
               if (Object.keys(patch).length) emitChange(patch);
               leadPaneSource = 'api';
-              opts.onSelectLeadModel?.({ providerId: provId, model: modelId });
+              opts.onSelectLeadModel?.({ providerId: provId, model: modelId, reasoningEffort:effort });
               closePopover();
             },
           }));
@@ -700,7 +656,8 @@ export function createWorkCliPicker(opts = {}) {
       : descriptor;
 
     const cfg = getEngineConfig(settings, engineItem.id);
-    const isNative = cfg.modelSource === 'native';
+    const nativeOnly = effectiveDesc?.supportsCustomModel === false;
+    const isNative = nativeOnly || cfg.modelSource === 'native';
 
     // Right Header: Clean status indicator (left) + [维度 API | 原生订阅] pills (right)
     const statusBox = document.createElement('div');
@@ -733,6 +690,7 @@ export function createWorkCliPicker(opts = {}) {
 
     btnApiSrc.onclick = ev => {
       ev.stopPropagation();
+      if (nativeOnly) return;
       const prevWorkModel = cfg.modelSource === 'work' ? cfg.model : '';
       const prevWorkProv = cfg.modelSource === 'work' ? cfg.providerId : '';
       emitChange({
@@ -765,7 +723,11 @@ export function createWorkCliPicker(opts = {}) {
       });
     };
 
-    srcSwitch.append(btnApiSrc, btnNativeSrc);
+    if (nativeOnly) {
+      srcSwitch.append(btnNativeSrc);
+    } else {
+      srcSwitch.append(btnApiSrc, btnNativeSrc);
+    }
     rightHeader.append(statusBox, srcSwitch);
 
     // =====================================================================
@@ -834,11 +796,12 @@ export function createWorkCliPicker(opts = {}) {
           const favKey = `native:${effectiveDesc?.id || engineItem.id}:${provArg}:${mId}`;
           rightList.append(renderModelItemRow({
             favKey,
+            modelId:mId, scope:JSON.stringify(['cli', effectiveDesc?.id || engineItem.id, provArg]), engine:effectiveDesc?.id || engineItem.id,
             displayName: prettifyModelShort(mId),
             tooltip: mId,
             isSelected: isCurrent,
             effortValue: isCurrent ? cfg.reasoningEffort : '',
-            onSelect: () => {
+            onSelect: (effort = cfg.reasoningEffort) => {
               emitChange({
                 cliEngine: engineItem.id,
                 cliModelSource: 'native',
@@ -847,25 +810,10 @@ export function createWorkCliPicker(opts = {}) {
                   modelSource: 'native',
                   providerId: provArg,
                   model: mId,
-                  reasoningEffort: cfg.reasoningEffort,
+                  reasoningEffort: effort,
                 },
               });
               closePopover();
-            },
-            onCycleEffort: () => {
-              const curIdx = EFFORT_CYCLE.indexOf(cfg.reasoningEffort || '');
-              const nextEff = EFFORT_CYCLE[(curIdx + 1) % EFFORT_CYCLE.length];
-              emitChange({
-                cliEngine: engineItem.id,
-                cliModelSource: 'native',
-                cliEngineConfig: {
-                  engineId: engineItem.id,
-                  modelSource: 'native',
-                  providerId: provArg,
-                  model: mId,
-                  reasoningEffort: nextEff,
-                },
-              });
             },
           }));
         }
@@ -944,11 +892,12 @@ export function createWorkCliPicker(opts = {}) {
           const isCur = isEngineActive && cfg.providerId === f.provId && cfg.model === f.modelId;
           rightList.append(renderModelItemRow({
             favKey: `model:${f.provId}:${f.modelId}`,
+            modelId:f.modelId, scope:JSON.stringify(['api', f.provId]), engine:effectiveDesc?.id || engineItem.id,
             displayName: prettifyModelShort(f.modelId),
             tooltip: `${f.provTitle} / ${f.modelId}`,
             isSelected: isCur,
             effortValue: isCur ? cfg.reasoningEffort : '',
-            onSelect: () => {
+            onSelect: (effort = cfg.reasoningEffort) => {
               emitChange({
                 cliEngine: engineItem.id,
                 cliModelSource: 'work',
@@ -957,25 +906,10 @@ export function createWorkCliPicker(opts = {}) {
                   modelSource: 'work',
                   providerId: f.provId,
                   model: f.modelId,
-                  reasoningEffort: cfg.reasoningEffort,
+                  reasoningEffort: effort,
                 },
               });
               closePopover();
-            },
-            onCycleEffort: () => {
-              const curIdx = EFFORT_CYCLE.indexOf(cfg.reasoningEffort || '');
-              const nextEff = EFFORT_CYCLE[(curIdx + 1) % EFFORT_CYCLE.length];
-              emitChange({
-                cliEngine: engineItem.id,
-                cliModelSource: 'work',
-                cliEngineConfig: {
-                  engineId: engineItem.id,
-                  modelSource: 'work',
-                  providerId: f.provId,
-                  model: f.modelId,
-                  reasoningEffort: nextEff,
-                },
-              });
             },
           }));
         }
@@ -1005,11 +939,12 @@ export function createWorkCliPicker(opts = {}) {
         const isCurrentModel = isEngineActive && cfg.providerId === provId && cfg.model === modelId;
         rightList.append(renderModelItemRow({
           favKey,
+          modelId, scope:JSON.stringify(['api', provId]), engine:effectiveDesc?.id || engineItem.id,
           displayName: prettifyModelShort(modelId),
           tooltip: `${provId} / ${modelId}`,
           isSelected: isCurrentModel,
           effortValue: isCurrentModel ? cfg.reasoningEffort : '',
-          onSelect: () => {
+          onSelect: (effort = cfg.reasoningEffort) => {
             emitChange({
               cliEngine: engineItem.id,
               cliModelSource: 'work',
@@ -1018,25 +953,10 @@ export function createWorkCliPicker(opts = {}) {
                 modelSource: 'work',
                 providerId: provId,
                 model: modelId,
-                reasoningEffort: cfg.reasoningEffort,
+                reasoningEffort: effort,
               },
             });
             closePopover();
-          },
-          onCycleEffort: () => {
-            const curIdx = EFFORT_CYCLE.indexOf(cfg.reasoningEffort || '');
-            const nextEff = EFFORT_CYCLE[(curIdx + 1) % EFFORT_CYCLE.length];
-            emitChange({
-              cliEngine: engineItem.id,
-              cliModelSource: 'work',
-              cliEngineConfig: {
-                engineId: engineItem.id,
-                modelSource: 'work',
-                providerId: provId,
-                model: modelId,
-                reasoningEffort: nextEff,
-              },
-            });
           },
         }));
       }
@@ -1168,9 +1088,11 @@ export function createWorkCliPicker(opts = {}) {
         // guidance, the active engine stays unchanged.
         if (isReady && activeEng !== item.id) {
           const cfg = getEngineConfig(settings, item.id);
+          const itemDesc = harnesses.find(h => h.id === item.id);
+          const defaultSrc = itemDesc?.supportsCustomModel === false ? 'native' : (cfg.modelSource || 'work');
           emitChange({
             cliEngine: item.id,
-            ...(item.id !== 'builtin' ? { cliModelSource: cfg.modelSource || 'work' } : {}),
+            ...(item.id !== 'builtin' ? { cliModelSource: defaultSrc } : {}),
           });
         }
         renderSplitView();
@@ -1209,48 +1131,12 @@ export function createWorkCliPicker(opts = {}) {
       : (HARNESS_CATALOG.find(x => x.id === focusedEngineId) || HARNESS_CATALOG[0]);
     const focusedDesc = harnesses.find(h => h.id === focusedMeta.id);
     renderRightModelPane(focusedMeta, focusedDesc, settings, harnesses, queryLower);
+    arrangeModels(rightList, {search:Boolean(queryLower)});
   };
 
   triggerBtn.addEventListener('click', ev => {
     ev.stopPropagation();
     togglePopover();
-  });
-
-  effortQuickBtn.addEventListener('click', ev => {
-    ev.stopPropagation();
-    const settings = getSettings();
-    const activeEng = settings.cliEngine || 'auto';
-    if (activeEng === 'builtin') {
-      const wl = getWorkLeadConfig(settings);
-      if (wl.mode !== 'cli' || !wl.engineId) return;
-      const idx = EFFORT_CYCLE.indexOf(wl.reasoningEffort || '');
-      const nextEff = EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length];
-      emitChange({
-        cliEngine: 'builtin',
-        workLead: {
-          mode: 'cli',
-          engineId: wl.engineId,
-          providerId: wl.providerId,
-          model: wl.model,
-          reasoningEffort: nextEff,
-        },
-      });
-      return;
-    }
-    const cfg = getEngineConfig(settings, activeEng);
-    const idx = EFFORT_CYCLE.indexOf(cfg.reasoningEffort || '');
-    const nextEff = EFFORT_CYCLE[(idx + 1) % EFFORT_CYCLE.length];
-    emitChange({
-      cliEngine: activeEng,
-      cliModelSource: cfg.modelSource || 'work',
-      cliEngineConfig: {
-        engineId: activeEng,
-        modelSource: cfg.modelSource || 'work',
-        providerId: cfg.providerId,
-        model: cfg.model,
-        reasoningEffort: nextEff,
-      },
-    });
   });
 
   searchInput.addEventListener('input', () => {

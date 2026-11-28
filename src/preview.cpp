@@ -80,7 +80,7 @@ DirectoryIdentity directory_identity(HANDLE handle) {
     return {info.dwVolumeSerialNumber,info.nFileIndexHigh,info.nFileIndexLow};
 }
 struct Resource {std::string bytes;DirectoryIdentity root;};
-Resource read_resource(const fs::path& root,const fs::path& relative,bool content=true,const DirectoryIdentity* expected=nullptr) {
+void validate_relative(const fs::path& relative) {
     if(relative.empty()||relative.is_absolute()||relative.has_root_name())throw std::runtime_error("invalid relative path");
     for(const auto& part:relative) {
         const auto name=lower(utf8(part));
@@ -88,6 +88,9 @@ Resource read_resource(const fs::path& root,const fs::path& relative,bool conten
             name=="package-lock.json"||name=="package.json"||name.ends_with(".pem")||name.ends_with(".key"))
             throw std::runtime_error("resource outside preview");
     }
+}
+Resource read_resource(const fs::path& root,const fs::path& relative,bool content=true,const DirectoryIdentity* expected=nullptr) {
+    validate_relative(relative);
     // Hold each directory without DELETE sharing, so a reparse-point/rename
     // race cannot redirect the subsequent handle open outside the grant root.
     Handles pins;auto cursor=root.root_path();auto root_handle=pins.open(cursor,true);
@@ -105,38 +108,52 @@ Resource read_resource(const fs::path& root,const fs::path& relative,bool conten
 HttpResponse rejected(int status){HttpResponse r;r.status=status;r.headers={{"content-type","text/plain; charset=utf-8"},{"cache-control","no-store"}};r.body="Preview resource unavailable";return r;}
 }
 struct PreviewService::Impl {
-    struct Grant{fs::path root;DirectoryIdentity identity;Clock::time_point touched;};
+    struct Grant{fs::path root;DirectoryIdentity identity;Clock::time_point touched;SnapshotPaths snapshots;};
     std::mutex mutex;
     std::map<std::string,Grant> grants;
     HttpServer server{0,[this](const HttpRequest& r){return handle(r);},HttpAccessPolicy::IsolatedStatic};
     bool stopped=false;
     std::string origin()const{return "http://127.0.0.1:"+std::to_string(server.port());}
-    std::string url(const fs::path& html) {
+    std::string url(const fs::path& html, const fs::path& entry, const SnapshotPaths& snapshots) {
         const auto ext=lower(utf8(html.extension()));if(ext!=".html"&&ext!=".htm")return {};
         const auto absolute=fs::absolute(html).lexically_normal(),root=absolute.parent_path();
         // Fail closed for links/unreadable entries before granting a URL.
         const auto resource=read_resource(root,absolute.filename(),false);
+        const auto relative = snapshots.empty() ? absolute.filename() : entry;
+        validate_relative(relative);
+        if (!snapshots.empty() && snapshots.at(relative) != absolute.filename()) return {};
+        std::string encoded_path;
+        for (const auto& part : relative) {
+            encoded_path += "/" + encode(utf8(part));
+        }
         std::lock_guard lock(mutex);if(stopped)return {};
         server.start();const auto now=Clock::now();
         std::erase_if(grants,[&](const auto& item){return now-item.second.touched>std::chrono::minutes(30);});
         std::string key;
-        for(auto& [id,g]:grants)if(g.root==root&&g.identity==resource.root){key=id;g.touched=now;break;}
+        for(auto& [id,g]:grants)if(g.root==root&&g.identity==resource.root&&g.snapshots==snapshots){key=id;g.touched=now;break;}
         if(key.empty()){
             if(grants.size()>=128){auto oldest=std::min_element(grants.begin(),grants.end(),[](const auto& a,const auto& b){return a.second.touched<b.second.touched;});grants.erase(oldest);}
-            key=token();grants.emplace(key,Grant{root,resource.root,now});
+            key=token();grants.emplace(key,Grant{root,resource.root,now,snapshots});
         }
-        return origin()+"/v/"+key+"/"+encode(utf8(absolute.filename()));
+        return origin()+"/v/"+key+encoded_path;
     }
     HttpResponse handle(const HttpRequest& request) {
         try {
             if(!request.path.starts_with("/v/"))return rejected(404);
             const auto slash=request.path.find('/',3);if(slash!=67)return rejected(404);
             const auto key=request.path.substr(3,64);fs::path root;DirectoryIdentity expected;
+            const auto relative=path8(decode(std::string_view(request.path).substr(slash+1)));
+            validate_relative(relative);
+            auto physical = relative;
             {std::lock_guard lock(mutex);const auto found=grants.find(key);if(found==grants.end()||Clock::now()-found->second.touched>std::chrono::minutes(30))return rejected(404);
-                root=found->second.root;expected=found->second.identity;found->second.touched=Clock::now();}
-            auto relative=path8(decode(std::string_view(request.path).substr(slash+1)));
+                root=found->second.root;expected=found->second.identity;found->second.touched=Clock::now();
+                if (!found->second.snapshots.empty()) {
+                    const auto file = found->second.snapshots.find(relative);
+                    if (file == found->second.snapshots.end()) return rejected(404);
+                    physical = file->second;
+                }}
             const auto type=mime(relative);if(type.empty())return rejected(404);
-            HttpResponse response;response.body=read_resource(root,relative,true,&expected).bytes;
+            HttpResponse response;response.body=read_resource(root,physical,true,&expected).bytes;
             if(type.starts_with("text/html")&&request.target.find("shim=1")!=std::string::npos){
                 static constexpr std::string_view kShim=
                     "<script>(()=>{try{void window.localStorage.length}catch{"
@@ -176,7 +193,7 @@ struct PreviewService::Impl {
 };
 PreviewService::PreviewService():impl_(std::make_unique<Impl>()){}
 PreviewService::~PreviewService(){shutdown();}
-std::string PreviewService::url(const fs::path& html){return impl_->url(html);}
+std::string PreviewService::url(const fs::path& html,const fs::path& entry,const SnapshotPaths& snapshots){return impl_->url(html,entry,snapshots);}
 void PreviewService::shutdown() noexcept{
     {std::lock_guard lock(impl_->mutex);impl_->stopped=true;}
     impl_->server.stop();

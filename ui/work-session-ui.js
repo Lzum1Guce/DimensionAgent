@@ -721,9 +721,9 @@ function renderDeliverablePackageZone({
     const cpRow = el('div', 'work-inline-checkpoints');
     cpRow.append(el('span', 'work-inline-cp-title', '⏱ 时光机版本：'));
     for (const cp of checkpoints) {
-      const b = el('button', 'work-inline-cp-btn', `v${cp.versionNumber}`);
+      const b = el('button', 'work-inline-cp-btn', `v${cp.version}`);
       b.type = 'button';
-      b.title = `v${cp.versionNumber} · ${cp.label || '历史快照'}（点击在右侧画布对比或回退）`;
+      b.title = `v${cp.version} · ${cp.label || '历史快照'}（点击在右侧画布对比或回退）`;
       b.onclick = () => dock?.openArtifacts({ checkpointId: cp.id });
       cpRow.append(b);
     }

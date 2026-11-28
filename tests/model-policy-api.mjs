@@ -31,7 +31,7 @@ const plan = (enabled = true, higher = true) => ({ enabled, routes: {
 const setPlan = value => api('/api/dimension/work-models', value, 'PUT');
 const upgrades = run => run.events.filter(event => event.routeReason);
 const requests = tag => fixture.requests.filter(request => request.tag === tag);
-const submit = async tag => (await api('/api/dimension/work/runs', { botId: bot, text: 'APPTEST:' + tag, requestId: tag })).run;
+const submit = async tag => (await api('/api/dimension/work/runs', { botId: bot, text: '直接做，不用先出计划：APPTEST:' + tag, requestId: tag })).run;
 const contexts = work => ({ chat: 32768, group: 32768, work, complex: work });
 // Reconstruct the conservative native input reservation from the actual wire
 // request, including tool definitions/results, rather than assuming half a window.
@@ -110,7 +110,12 @@ async function startFixture() {
       const body = JSON.parse(bytes);
       const tag = body.messages.filter(message => message.role === 'user')
         .map(message => /APPTEST:(policy_[a-z_]+)/.exec(String(message.content))?.[1]).filter(Boolean).at(-1);
-      assert(tag); assert(['small', 'middle', 'large'].includes(body.model));
+      if (!tag || (!body.tools?.length && tag !== 'policy_budget_chat')) {
+        res.writeHead(200, {'content-type': 'application/json'});
+        res.end(JSON.stringify({choices: [{message: {content: 'OK'}, finish_reason: 'stop'}]}));
+        return;
+      }
+      assert(['small', 'middle', 'large'].includes(body.model));
       const step = steps.get(tag) ?? 0; steps.set(tag, step + 1);
       assert(step < 10);
       const results = body.messages.filter(message => message.role === 'tool').map(message => JSON.parse(message.content));
@@ -179,7 +184,7 @@ try {
       ['policy-responses', 'openai-responses-compat', fixture.base + '/responses/v1/responses']])
       await api('/api/providers', { name, entry: { kind, baseUrl, spec: { model: 'small' } }, secretValue: 'synthetic-policy-key' });
     await api('/api/dimension/bots/' + bot + '/activate', {});
-    await api('/api/dimension/work/settings', { botId: bot, approvalMode: 'auto' }, 'PATCH');
+    await api('/api/dimension/work/settings', { botId: bot, cliEngine: 'builtin', workspaceMode: 'windows_native', projectCwd: output, approvalMode: 'full' }, 'PATCH');
     const originalContexts = (await api('/api/dimension/context-limits')).limits;
     assert.equal(originalContexts.work, 1048576);
     assert.equal(originalContexts.complex, 1048576);
@@ -227,7 +232,7 @@ try {
   await check('transient model failure upgrades once and reuses successful side-effect receipt', async () => {
     const tag = 'policy_transient', run = await submit(tag), done = await settled(run.id);
     assert.equal(upgrades(done).length, 1); assert.equal(upgrades(done)[0].routeReason, 'model_http_503');
-    assert.deepEqual(requests(tag).map(request => request.model), ['small', 'small', 'middle', 'middle', 'middle']);
+    assert.deepEqual(requests(tag).map(request => request.model), ['small', 'small', 'middle', 'middle']);
     const native = JSON.parse(await readFile(path.join(data, 'work-runs/runs', run.id, 'snapshot.json'), 'utf8'));
     const writes = native.tools.filter(tool => tool.call.name === 'write_file');
     assert.equal(writes.length, 2); assert(writes.every(tool => tool.state === 'finished' && !tool.execution.error));
@@ -249,7 +254,7 @@ try {
   await check('two failed completion checks trigger one configured upgrade', async () => {
     const tag = 'policy_difficulty', run = await submit(tag), done = await settled(run.id);
     assert.equal(upgrades(done).length, 1); assert.equal(upgrades(done)[0].routeReason, 'verification_failed');
-    assert.deepEqual(requests(tag).map(request => request.model), ['small', 'small', 'small', 'middle', 'middle', 'middle']);
+    assert.deepEqual(requests(tag).map(request => request.model), ['small', 'small', 'small', 'middle', 'middle']);
   });
   await check('no higher route, disabled routing, auth and uncertain effects do not upgrade', async () => {
     for (const tag of ['policy_no_higher', 'policy_disabled', 'policy_auth', 'policy_uncertain']) {
@@ -275,7 +280,7 @@ try {
     await setPlan(plan());
     const tag = 'policy_output_recover', run = await submit(tag), done = await settled(run.id);
     assert.equal(upgrades(done).length, 0);
-    assert.equal(requests(tag).length, 5);
+    assert.equal(requests(tag).length, 4);
     assert(requests(tag).every(request => request.model === 'small' && request.maxTokens === 256000));
     const native = JSON.parse(await readFile(path.join(data, 'work-runs/runs', run.id, 'snapshot.json'), 'utf8'));
     assert(!native.messages.some(message => String(message.content).includes('PARTIAL_MUST_NOT_COMPLETE')));

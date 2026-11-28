@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <string>
 namespace dimension {
 // Own loopback origin. Grants expose only local web resources under the
@@ -9,7 +10,9 @@ class PreviewService {
 public:
     PreviewService();
     ~PreviewService();
-    std::string url(const std::filesystem::path& html);
+    using SnapshotPaths = std::map<std::filesystem::path, std::filesystem::path>;
+    std::string url(const std::filesystem::path& html, const std::filesystem::path& entry = {},
+                    const SnapshotPaths& snapshots = {});
     void shutdown() noexcept;
 private:
     struct Impl;

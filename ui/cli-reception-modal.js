@@ -1,20 +1,16 @@
+import { arrangeModels, effortLevels, modelChoice } from './model-catalog-view.js';
 /**
  * DimensionAgent · 接待模型「本机 CLI」设置弹窗与通用判断工具 (ESM)
  * - 零 Emoji / 极简单色线性 SVG / 严格 CSP 合规
  * - 统一服务于 Chat 主底栏模型菜单、像素剧院/沉浸舞台模型浮窗、Work 接待模型与游乐场接待模型
  */
 
-const CLI_ENGINE_META = [
-  { id: 'antigravity',      label: 'Antigravity (agy)' },
-  { id: 'hermes',           label: 'Hermes' },
-  { id: 'kimi-code',        label: 'Kimi Code' },
-  { id: 'deepseek-harness', label: 'DeepSeek Harness' },
-  { id: 'claude-code',      label: 'Claude Code' },
-  { id: 'codex',            label: 'Codex' },
-  { id: 'opencode',         label: 'OpenCode' },
-  { id: 'qwen-code',        label: 'Qwen Code' },
-  { id: 'gemini-cli',       label: 'Gemini CLI' },
-];
+import { cliEngineDisplayName, cliOptions } from './cli-engine-catalog.js';
+export { cliEngineDisplayName };
+
+const CLI_ENGINE_META = cliOptions([
+  'antigravity', 'hermes', 'kimi-code', 'deepseek-harness', 'claude-code', 'codex', 'opencode', 'qwen-code', 'gemini-cli',
+]);
 
 export function isCliSelection(sel) {
   if (!sel || typeof sel !== 'object') return false;
@@ -31,11 +27,6 @@ export function extractCliEngineId(sel) {
     return sel.providerId.slice(4);
   }
   return '';
-}
-
-export function cliEngineDisplayName(engineId) {
-  const found = CLI_ENGINE_META.find((x) => x.id === engineId);
-  return found ? found.label : String(engineId || 'CLI');
 }
 
 export function shortModelName(modelId) {
@@ -116,7 +107,7 @@ export function openCliReceptionModal({
     </div>
     <div class="cli-rec-toolbar">
       <div class="cli-rec-cur-pill" data-role="current-pill"></div>
-      <input type="search" class="cli-rec-search" data-role="search" placeholder="搜索可用模型或 CLI 引擎（如 grok / gpt / deepseek / kimi）…" autocomplete="off" spellcheck="false">
+      <input type="search" class="cli-rec-search" data-role="search" placeholder="搜索可用模型或 CLI 引擎（如 neon / xhigh / claude / kimi）…" autocomplete="off" spellcheck="false">
     </div>
     <div class="cli-rec-body thin-scroll" data-role="body"></div>
     <div class="cli-rec-foot">
@@ -172,7 +163,7 @@ export function openCliReceptionModal({
     curPill.append(dot, txt);
   };
 
-  const pickCliModel = async ({ engineId, cliProvider = '', model = '' }) => {
+  const pickCliModel = async ({ engineId, cliProvider = '', model = '', reasoningEffort = '' }) => {
     if (busy) return;
     busy = true;
     statusEl.textContent = '正在应用本机 CLI 接待模型…';
@@ -182,7 +173,7 @@ export function openCliReceptionModal({
       engineId,
       cliProvider: String(cliProvider || ''),
       model: String(model || ''),
-      reasoningEffort: '',
+      reasoningEffort,
     };
     try {
       if (typeof onSelectCli === 'function') {
@@ -334,13 +325,11 @@ export function openCliReceptionModal({
               btn.appendChild(bdg);
             }
 
-            btn.addEventListener('click', () => {
-              void pickCliModel({
-                engineId: meta.id,
-                cliProvider: item.cliProvider,
-                model: item.model,
-              });
-            });
+            const apply = (effort = '') => pickCliModel({engineId:meta.id, cliProvider:item.cliProvider,
+              model:item.model, reasoningEffort:effort});
+            btn.onclick = () => void apply();
+            if (!item.isDefault) modelChoice(btn, {scope:JSON.stringify(['cli',meta.id,item.cliProvider]), id:item.model, engine:meta.id,
+              selected:isSelected, effort:isSelected ? activeSel.reasoningEffort : '', levels:effortLevels(meta.id), apply});
             grid.appendChild(btn);
           }
           card.appendChild(grid);
@@ -399,6 +388,7 @@ export function openCliReceptionModal({
 
       row.append(engSel, modelInp, provInp, applyBtn);
       manual.append(sum, row);
+      arrangeModels(bodyEl, {search:Boolean(q)});
       bodyEl.appendChild(manual);
     }
 

@@ -29,7 +29,7 @@ function compatibility(value, inspected = false) {
 export function bindPluginMarket({ api, host, onChanged = () => {} }) {
   if (!document.querySelector('link[data-plugin-market-style]')) {
     const stylesheet = document.createElement('link'); stylesheet.rel = 'stylesheet';
-    stylesheet.href = new URL('./plugin-market-ui.css?v=1fe0a8da0e', import.meta.url).href;
+    stylesheet.href = new URL('./plugin-market-ui.css?v=5682208ee8', import.meta.url).href;
     stylesheet.dataset.pluginMarketStyle = '1'; document.head.append(stylesheet);
   }
   host.classList.add('plugin-market');

@@ -1,3 +1,6 @@
+import { arrangeModels, effortLevels, effortSlider, modelChoice } from './model-catalog-view.js';
+import { CLI_ORDER, cliOptions } from './cli-engine-catalog.js';
+
 // Right-side Hand-Journal Bookmark Tab: Model Canvas (UE Blueprint + Circuit Loop + Edge-Attachment)
 // Pure native ES Module: HTML node chips + SVG cubic Bezier wires + live junction dots + real-time execution view.
 
@@ -34,18 +37,7 @@ const LOGIC_OP_OPTIONS = [
 
 const isLogicGateMode = m => m === 'bool_switch' || m === 'logic_and' || m === 'logic_or';
 
-const CLI_ENGINE_OPTIONS = [
-  { id: 'auto', label: '自动优选 CLI' },
-  { id: 'antigravity', label: 'Antigravity (agy)' },
-  { id: 'claude-code', label: 'Claude Code' },
-  { id: 'codex', label: 'Codex' },
-  { id: 'gemini-cli', label: 'Gemini CLI' },
-  { id: 'qwen-code', label: 'Qwen Code' },
-  { id: 'opencode', label: 'OpenCode' },
-  { id: 'kimi-code', label: 'Kimi Code' },
-  { id: 'deepseek-harness', label: 'DeepSeek Harness' },
-  { id: 'hermes', label: 'Hermes' },
-];
+const CLI_ENGINE_OPTIONS = [{ id: 'auto', label: '自动优选 CLI' }, ...cliOptions(CLI_ORDER)];
 
 const el = (tag, className = '', text) => {
   const n = document.createElement(tag);
@@ -61,6 +53,50 @@ const svgEl = (tag, attrs = {}) => {
 };
 
 const deepClone = obj => JSON.parse(JSON.stringify(obj));
+
+// Filters the same actions that are available in the palette, including saved functions.
+class BlueprintPalette {
+  constructor(menu) {
+    this.menu = menu;
+    this.input = el('input', 'mc-palette-search');
+    this.input.type = 'search';
+    this.input.placeholder = '搜索步骤或函数';
+    this.input.setAttribute('aria-label', this.input.placeholder);
+    this.empty = el('p', 'mc-no-matches', '没有匹配的步骤或函数');
+    this.empty.setAttribute('role', 'status');
+    this.input.oninput = () => this.filter();
+    this.input.onkeydown = event => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        this.menu.querySelector('.mc-add-item:not([hidden])')?.click();
+      }
+    };
+  }
+  open() {
+    this.input.value = '';
+    this.menu.prepend(this.input);
+    this.menu.append(this.empty);
+    this.filter();
+    this.input.focus();
+  }
+  filter() {
+    const query = this.input.value.trim().toLocaleLowerCase();
+    let section, count = 0;
+    for (const item of this.menu.children) {
+      if (item.classList.contains('mc-add-sec')) {
+        section = item;
+        section.hidden = true;
+      } else if (item.classList.contains('mc-add-item')) {
+        item.hidden = !item.textContent.toLocaleLowerCase().includes(query);
+        if (!item.hidden) {
+          if (section) section.hidden = false;
+          ++count;
+        }
+      }
+    }
+    this.empty.hidden = count > 0;
+  }
+}
 
 function uid(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -162,8 +198,6 @@ export function createModelCanvasPane({
 
   // Top Header Toolbar
   const topbar = el('div', 'mc-topbar');
-  const brandBadge = el('span', 'mc-brand', 'DimensionImage');
-  brandBadge.title = 'DimensionImage · 通俗可视化自动化流程蓝图';
   const crumbBar = el('div', 'mc-crumbs');
   const tplSelect = el('select', 'mc-select mc-tpl-select');
   tplSelect.title = '切换 DimensionImage 流程蓝图或新建流程';
@@ -177,11 +211,11 @@ export function createModelCanvasPane({
   btnRedo.type = 'button'; btnRedo.title = '重做 (Ctrl+Y / Ctrl+Shift+Z)'; btnRedo.disabled = true;
   const undoGrp = el('div', 'mc-undo-grp');
   undoGrp.append(btnUndo, btnRedo);
-  const btnAutoLayout = el('button', 'mc-btn', '✨ 整理');
+  const btnAutoLayout = el('button', 'mc-btn', '整理布局');
   btnAutoLayout.type = 'button'; btnAutoLayout.title = '一键自动整理排版，消除节点重叠与连线交叉（可 Ctrl+Z 撤回）';
-  const btnAddNode = el('button', 'mc-btn', '＋步骤 ▾');
+  const btnAddNode = el('button', 'mc-btn', '添加步骤');
   btnAddNode.type = 'button'; btnAddNode.title = '添加动作积木（也可在画布空白处右键直接原地添加）';
-  const btnCollapse = el('button', 'mc-btn is-blueprint', '📦 打包组合');
+  const btnCollapse = el('button', 'mc-btn is-blueprint', '封装函数');
   btnCollapse.type = 'button'; btnCollapse.title = '把选中的多个步骤打包成一个常用组合，以后一键重复使用';
   btnCollapse.disabled = true;
   const btnRunToggle = el('button', 'mc-btn is-primary', '▶ 运行');
@@ -193,13 +227,14 @@ export function createModelCanvasPane({
   btnClose.onclick = () => onCloseDock?.();
 
   const topLeft = el('div', 'mc-top-group');
-  topLeft.append(brandBadge, crumbBar, tplSelect, btnNew);
+  topLeft.append(crumbBar, tplSelect, btnNew);
   const topRight = el('div', 'mc-top-group');
   topRight.append(undoGrp, btnAutoLayout, btnAddNode, btnCollapse, btnSave, btnRunToggle, btnCancelRun, btnClose);
   topbar.append(topLeft, topRight);
 
   // Add-Node Popover Menu
   const addMenu = el('div', 'mc-add-menu');
+  const palette = new BlueprintPalette(addMenu);
   addMenu.hidden = true;
 
   // Smart Right-Click Context Menu (canvas / node / edge)
@@ -562,6 +597,7 @@ export function createModelCanvasPane({
     selectedEdgeId = '';
     inspectorOpen = false;
     ctxMenu.hidden = true;
+    collapseBar.hidden = true;
     clearDirty();
     resetHistory();
     if (pushDrill) {
@@ -936,7 +972,7 @@ export function createModelCanvasPane({
 
       if ((library.functions || []).length) {
         const grpF = document.createElement('optgroup');
-        grpF.label = '📦 已打包的常用组合步骤（双击展开编辑）';
+        grpF.label = '可复用函数';
         for (const f of library.functions) {
           const opt = document.createElement('option');
           opt.value = f.id;
@@ -953,7 +989,7 @@ export function createModelCanvasPane({
       return n && n.type !== 'input';
     }).length;
     btnCollapse.disabled = collapsibleCount === 0;
-    btnCollapse.textContent = collapsibleCount > 0 ? `📦 打包组合 (${collapsibleCount})` : '📦 打包组合';
+    btnCollapse.textContent = collapsibleCount > 0 ? `封装函数 (${collapsibleCount})` : '封装函数';
     renderWorkLinkBar();
   };
 
@@ -1010,6 +1046,7 @@ export function createModelCanvasPane({
       { type: 'agent', title: '让伙伴处理', desc: '选用常驻伙伴或新建临时角色 · 支持模型 / 沙盒 CLI' },
       { type: 'compress', title: '提炼整理信息', desc: '把前面内容提炼成精简要点或交接单，不爆上下文' },
       { type: 'gate', title: '等我确认 / 自动检查', desc: '停下来等我点通过/重做，或按关键词自动返工' },
+      { type: 'gate', title: '最终验收', desc: '每个直接上游须在末行给出通过结论；返工用尽后停止交付', preset: {title:'最终验收', gateMode:'auto_condition', requirePass:true} },
       { type: 'input', title: '开始步骤', desc: '整个流程或组合步骤的起点' },
     ];
     for (const it of flowItems) {
@@ -1017,13 +1054,13 @@ export function createModelCanvasPane({
       row.type = 'button';
       row.append(el('strong', '', `${NODE_TYPE_META[it.type].icon} ${it.title}`), el('span', '', it.desc));
       row.onclick = () => {
-        addNodeToCanvas(it.type);
+        addNodeToCanvas(it.type, it.preset);
         addMenu.hidden = true;
       };
       addMenu.append(row);
     }
     if ((library.functions || []).length) {
-      addMenu.append(el('div', 'mc-add-sec', '📦 插入常用组合步骤'));
+      addMenu.append(el('div', 'mc-add-sec', '可复用函数'));
       for (const fn of library.functions) {
         if (graph?.kind === 'function' && fn.id === graph.id) continue;
         const row = el('button', 'mc-add-item is-fn');
@@ -1083,6 +1120,7 @@ export function createModelCanvasPane({
       compressMode: 'handoff_card',
       maxOutputChars: 2400,
       gateMode: extra.gateMode || 'approval',
+      requirePass: Boolean(extra.requirePass),
       passKeyword: 'PASS',
       failKeyword: 'FAIL',
       maxIterations: 3,
@@ -1667,7 +1705,7 @@ export function createModelCanvasPane({
         return cnt ? `任一满足（${cnt} 条条件）${inv}` : `任一上游为真 (OR)${inv}`;
       }
       return n.gateMode === 'auto_condition'
-        ? `自动检查 (${n.passKeyword || 'PASS'}) · 最多 ${n.maxIterations || 3}次`
+        ? `${n.requirePass ? '最终验收' : '自动检查'} (${n.passKeyword || 'PASS'}) · 最多 ${n.maxIterations || 3}次`
         : `等我确认 · 最多重做 ${n.maxIterations || 3}次`;
     }
     if (n.type === 'function_call') {
@@ -2228,34 +2266,44 @@ export function createModelCanvasPane({
       }
 
       if (graph.id.startsWith('grp-bp-')) {
-        inspector.append(makeCheckbox('锁定此节点的成员与执行组合',Boolean(node.assignmentLocked),v=>{
-          node.assignmentLocked=v; markDirty(); renderWorkLinkBar();
+        inspector.append(makeCheckbox('锁定此节点的成员与执行组合', Boolean(node.assignmentLocked), v => {
+          node.assignmentLocked = v; markDirty(); renderWorkLinkBar();
+        }));
+        inspector.append(makeCheckbox('需要操作项目文件 / 运行命令（强制走 CLI）', Boolean(node.requiresWorkspace), v => {
+          node.requiresWorkspace = v; markDirty(); renderAll();
         }));
       }
-      const poolRestricted = graph.id.startsWith('grp-bp-') && node.id !== 'bp-lead-final' && library.modelPool?.length;
-      if (poolRestricted) {
+      const hasPoolPresets = graph.id.startsWith('grp-bp-') && node.id !== 'bp-lead-final' && library.modelPool?.length;
+      if (hasPoolPresets) {
         const entries = library.modelPool.filter(m => !node.requiresWorkspace || m.engineId);
         const current = entries.findIndex(m => m.engineId
           ? node.engineKind === 'cli' && node.cliModelSource === 'native' && m.engineId === node.cliEngineId && m.model === node.cliNativeModel && (m.providerId || '') === (node.cliNativeProvider || '')
           : node.engineKind !== 'cli' && node.providerId === m.providerId && node.model === m.model);
-        const opts = entries.map((m,i) => ({value:String(i),label:[m.engineId || 'API',m.providerId,m.model].filter(Boolean).join(' / ')}));
-        if (current < 0) opts.unshift({value:'',label:'请选择允许池中的组合'});
-        inspector.append(makeSelect('此节点的执行组合',opts,current < 0 ? '' : String(current),value => {
+        const opts = entries.map((m, i) => ({ value: String(i), label: [m.engineId || 'API', m.providerId, m.model].filter(Boolean).join(' / ') }));
+        opts.unshift({ value: '', label: current < 0 ? '自由自定义（当前为池外或自定义组合）' : '— 或在下方自由修改 —' });
+        inspector.append(makeSelect('快速套用群模型池（可选）', opts, current < 0 ? '' : String(current), value => {
           const m = value === '' ? null : entries[Number(value)];
           if (!m) return;
-          Object.assign(node, {assignmentLocked:true,engineKind:m.engineId ? 'cli':'api',cliEngineId:m.engineId || 'auto',
-            cliModelSource:m.engineId ? 'native':'work',cliNativeProvider:m.engineId ? m.providerId || '' : '',
-            cliNativeModel:m.engineId ? m.model : '',providerId:m.engineId ? '' : m.providerId,model:m.engineId ? '' : m.model});
+          Object.assign(node, {
+            assignmentLocked: true,
+            engineKind: m.engineId ? 'cli' : 'api',
+            cliEngineId: m.engineId || 'auto',
+            cliModelSource: m.engineId ? 'native' : 'work',
+            cliNativeProvider: m.engineId ? (m.providerId || '') : '',
+            cliNativeModel: m.engineId ? m.model : '',
+            providerId: m.engineId ? '' : m.providerId,
+            model: m.engineId ? '' : m.model,
+          });
           markDirty(); renderAll();
         }));
-        if (node.requiresWorkspace) inspector.append(el('small','mc-muted','此节点需要工作区执行能力，仅显示 CLI。'));
-      } else {
-      // Engine selector: Dimension API vs Official Code CLI (Bubblewrap Sandbox!)
+        if (node.requiresWorkspace) inspector.append(el('small', 'mc-muted', '提示：当前勾选了工作区操作要求，执行时需选用官方 Code CLI。'));
+      }
+      // Always allow full free selection of Dimension API / Official Code CLI / outside-pool models!
       inspector.append(makeSelect('执行引擎', [
         { value: 'api', label: '维度 API（自定义模型直连）' },
         { value: 'cli', label: '官方 Code CLI（遵循沙盒隔离策略）' },
       ], node.engineKind || 'api', v => {
-        node.engineKind = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderAll();
+        node.engineKind = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked = true; markDirty(); renderAll();
       }));
 
       if (node.engineKind === 'cli') {
@@ -2265,17 +2313,21 @@ export function createModelCanvasPane({
           return { value: o.id, label: o.label + tag };
         });
         inspector.append(makeSelect('指定 Code CLI', cliOpts, node.cliEngineId || 'auto', v => {
-          node.cliEngineId = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderNodesAndEdges();
+          node.cliEngineId = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked = true; markDirty(); renderAll();
         }));
         inspector.append(makeSelect('CLI 模型驱动源', [
           { value: 'work', label: '维度 API 驱动（免登录，直接用下方模型）' },
           { value: 'native', label: '官方原生订阅（使用该 CLI 沙盒登录态）' },
         ], node.cliModelSource || 'work', v => {
-          node.cliModelSource = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderAll();
+          node.cliModelSource = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked = true; markDirty(); renderAll();
         }));
         if (node.cliModelSource === 'native') {
+          const nativeIds = (library.harnesses || []).find(h => h.id === node.cliEngineId)?.nativeModelGroups
+            ?.flatMap(group => group.models || []) || [];
+          if (nativeIds.length) appendBlueprintModels(inspector, node, nativeIds, node.cliNativeModel,
+            JSON.stringify(['cli',node.cliEngineId,'']), true);
           inspector.append(makeField('原生模型 ID（留空用 CLI 默认）', 'text', node.cliNativeModel || '', v => {
-            node.cliNativeModel = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderNodesAndEdges();
+            node.cliNativeModel = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked = true; markDirty(); renderNodesAndEdges();
           }, '例如：gpt-5 / claude-sonnet-4-6'));
         }
       }
@@ -2284,14 +2336,12 @@ export function createModelCanvasPane({
         appendProviderModelFields(inspector, node);
       }
 
+      if (!inspector.querySelector('[data-blueprint-models]')) {
+        inspector.append(effortSlider(['', 'low', 'medium', 'high'], node.reasoningEffort, level => {
+          node.reasoningEffort = level;
+          markDirty();
+        }));
       }
-
-      inspector.append(makeSelect('推理强度', [
-        { value: '', label: 'Auto（默认）' },
-        { value: 'low', label: 'Low（轻量快速）' },
-        { value: 'medium', label: 'Medium（均衡）' },
-        { value: 'high', label: 'High（深度推理）' },
-      ], node.reasoningEffort || '', v => { node.reasoningEffort = v; markDirty(); }));
 
       inspector.append(makeSelect('上下文接收模式', [
         { value: 'handoff', label: '精简交接（推荐：总委托 + 连线主干与并行补充）' },
@@ -2440,10 +2490,13 @@ export function createModelCanvasPane({
           node.maxIterations = Math.max(1, Math.min(20, Number(v) || 3)); markDirty(); renderNodesAndEdges();
         }));
       } else if (node.gateMode === 'auto_condition') {
-        inspector.append(makeField('通过关键词（上游包含即继续）', 'text', node.passKeyword || 'PASS', v => {
+        inspector.append(makeCheckbox('最终验收：未通过且无法继续返工时停止流程', Boolean(node.requirePass), v => {
+          node.requirePass = v; markDirty(); renderAll();
+        }));
+        inspector.append(makeField(node.requirePass ? '每个直接上游的末行通过结论（整行匹配）' : '通过关键词（上游包含即继续）', 'text', node.passKeyword || 'PASS', v => {
           node.passKeyword = v; markDirty(); renderNodesAndEdges();
         }));
-        inspector.append(makeField('重做关键词（上游包含即打回重做）', 'text', node.failKeyword || 'FAIL', v => {
+        if (!node.requirePass) inspector.append(makeField('重做关键词（上游包含即打回重做）', 'text', node.failKeyword || 'FAIL', v => {
           node.failKeyword = v; markDirty(); renderNodesAndEdges();
         }));
         inspector.append(makeField('最多重做次数（防无限循环，1~20）', 'number', String(node.maxIterations || 3), v => {
@@ -2520,6 +2573,32 @@ export function createModelCanvasPane({
     }
   };
 
+  function appendBlueprintModels(container, node, ids, current, scope, native) {
+    const details = el('details', 'blueprint-model-catalog');
+    details.dataset.blueprintModels = '';
+    details.append(el('summary', '', current || '选择基础模型'));
+    const list = el('div', 'blueprint-model-list');
+    for (const id of new Set([...(current ? [current] : []), ...ids])) {
+      const option = el('button', 'mc-btn');
+      option.type = 'button';
+      option.append(el('span', 'base-model-label', id));
+      const apply = (level = '') => {
+        if (native) node.cliNativeModel = id;
+        else node.model = id;
+        node.reasoningEffort = level;
+        if (graph.id.startsWith('grp-bp-')) node.assignmentLocked = true;
+        markDirty();
+        renderAll();
+      };
+      option.onclick = () => apply();
+      list.append(modelChoice(option, {id, scope, engine:native ? node.cliEngineId : '', selected:current === id, effort:node.reasoningEffort,
+        levels:native ? effortLevels(node.cliEngineId) : ['', 'low', 'medium', 'high'], apply}));
+    }
+    arrangeModels(list);
+    details.append(list);
+    container.append(details);
+  }
+
   function appendProviderModelFields(container, node) {
     const groups = getProviderGroups?.() || [];
     const provOpts = [{ value: '', label: '自动沿用默认模型' }];
@@ -2539,13 +2618,7 @@ export function createModelCanvasPane({
     }));
     const curGrp = groups.find(x => x.providerId === node.providerId);
     if (curGrp && Array.isArray(curGrp.models) && curGrp.models.length) {
-      const mOpts = curGrp.models.map(m => ({ value: m, label: m }));
-      if (node.model && !mOpts.some(o => o.value === node.model)) {
-        mOpts.unshift({ value: node.model, label: `${node.model}（当前指定）` });
-      }
-      container.append(makeSelect('指定模型', mOpts, node.model || mOpts[0].value, v => {
-        node.model = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderNodesAndEdges();
-      }));
+      appendBlueprintModels(container, node, curGrp.models, node.model, JSON.stringify(['api',node.providerId]), false);
     } else if (node.providerId || node.model) {
       container.append(makeField('模型 ID', 'text', node.model || '', v => {
         node.model = v; if (graph.id.startsWith('grp-bp-')) node.assignmentLocked=true; markDirty(); renderNodesAndEdges();
@@ -2868,9 +2941,10 @@ export function createModelCanvasPane({
       const rr = root.getBoundingClientRect();
       const br = btnAddNode.getBoundingClientRect();
       addMenu.style.top = `${Math.round(br.bottom - rr.top + 6)}px`;
-      addMenu.style.left = `${Math.max(8, Math.min(Math.round(br.left - rr.left), Math.round(rr.width - 252)))}px`;
+      addMenu.style.left = `${Math.max(8, Math.min(Math.round(br.left - rr.left), Math.round(rr.width - 304)))}px`;
       addMenu.style.right = 'auto';
       addMenu.hidden = false;
+      palette.open();
     } else {
       addMenu.hidden = true;
     }
@@ -2945,10 +3019,15 @@ export function createModelCanvasPane({
     if (!ids.length) return;
     collapseBar.replaceChildren();
     collapseBar.hidden = false;
-    const titleSpan = el('span', 'mc-collapse-title', `📦 将已选 ${ids.length} 个步骤打包为常用组合：`);
+    const owner = graph.id;
+    const titleSpan = el('span', 'mc-collapse-title', `将 ${ids.length} 个步骤封装为函数`);
     const nameInp = el('input', 'mc-run-input');
     nameInp.type = 'text';
-    nameInp.placeholder = '输入组合名称（例如：读取并整理日报）';
+    nameInp.placeholder = '函数名称';
+    nameInp.setAttribute('aria-label', '函数名称');
+    const description = el('input', 'mc-run-input');
+    description.placeholder = '用途说明（可选，可搜索）';
+    description.setAttribute('aria-label', '函数用途');
     nameInp.value = `常用组合 ${(library.functions || []).length + 1}`;
     const okBtn = el('button', 'mc-btn is-blueprint', '确认打包');
     okBtn.type = 'button';
@@ -2956,24 +3035,36 @@ export function createModelCanvasPane({
     cancelBtn.type = 'button';
     cancelBtn.onclick = () => { collapseBar.hidden = true; };
     okBtn.onclick = async () => {
-      if (dirty) {
-        const saved = await saveCurrentGraph({ silent: true });
-        if (!saved) return;
-      }
+      if (okBtn.disabled || graph?.id !== owner) return;
+      okBtn.disabled = true;
       try {
+        if (dirty && !await saveCurrentGraph({ silent: true })) return;
+        const submitted = graph;
+        const revision = editRevision;
         const res = await api('/api/dimension/canvas/collapse', {
           method: 'POST',
           body: JSON.stringify({
-            canvasId: graph.id,
+            canvasId: owner,
             nodeIds: ids,
             name: nameInp.value.trim() || '自定义组合步骤',
-            description: `由 ${ids.length} 个步骤打包而成的常用组合`,
+            description: description.value.trim(),
           }),
         });
         collapseBar.hidden = true;
         if (res?.canvas && res?.function) {
-          await loadLibrary({ keepCurrent: false });
-          openGraphById(res.canvas.id);
+          for (const item of [res.function, res.canvas]) {
+            const list = item.kind === 'function' ? library.functions : library.canvases;
+            const index = list.findIndex(entry => entry.id === item.id);
+            if (index < 0) list.push(item);
+            else list[index] = item;
+          }
+          if (graph !== submitted || editRevision !== revision) {
+            notify('函数已保存到函数库，当前编辑内容已保留');
+            return;
+          }
+          graph = deepClone(res.canvas);
+          clearDirty();
+          resetHistory();
           selectedNodeIds.clear();
           if (res.chipNodeId) selectedNodeIds.add(res.chipNodeId);
           inspectorOpen = true;
@@ -2981,10 +3072,12 @@ export function createModelCanvasPane({
           notify(`已打包常用组合「${res.function.name}」！双击即可展开查看或修改内部步骤。`);
         }
       } catch (err) {
-        notify(`打包失败：${err?.message || err}`);
+        notify(`封装失败：${err?.message || err}`);
+      } finally {
+        okBtn.disabled = false;
       }
     };
-    collapseBar.append(titleSpan, nameInp, okBtn, cancelBtn);
+    collapseBar.append(titleSpan, nameInp, description, okBtn, cancelBtn);
     nameInp.focus();
     nameInp.select();
   };

@@ -96,6 +96,33 @@ Json obj(const Json &j, std::string_view k) {
     auto p = j.find(k);
     return p ? *p : Json(O{});
 }
+// Both Work lists group only runs visible to that particular request.
+std::map<std::string, std::string> work_roots(const A& rows, const Json& relationships) {
+    std::map<std::string, std::string> roots;
+    for (const auto& row : rows) roots.emplace(str(row, "id"), "");
+    for (auto& [id, root] : roots) {
+        root = id;
+        std::set<std::string> visited{id};
+        while (const auto* relation = relationships.find(root)) {
+            const auto parent = str(*relation, "parent");
+            if (parent.empty() || !roots.contains(parent)) break;
+            if (!visited.insert(parent).second) { root = *visited.begin(); break; }
+            root = parent;
+        }
+    }
+    return roots;
+}
+
+struct WorkListEntry {
+    std::string id, timestamp;
+    const Json* row;
+    bool pinned;
+};
+bool work_list_order(const WorkListEntry& a, const WorkListEntry& b) {
+    if (a.pinned != b.pinned) return a.pinned > b.pinned;
+    if (a.timestamp != b.timestamp) return a.timestamp > b.timestamp;
+    return a.id > b.id;
+}
 std::vector<std::string> string_list(const Json &j) {
     if (!j.is_array()) throw ApiError(400, "名单必须为数组");
     std::vector<std::string> result;
@@ -206,6 +233,39 @@ std::string uid() {
         o << std::hex << std::setfill('0') << std::setw(2) << int(v);
     return o.str();
 }
+// Build the entire export beside its destination, then publish without replacing an existing entry.
+class DeliverableExport {
+public:
+    explicit DeliverableExport(const fs::path &target)
+        : staging_(target / path8(".dimension-export-" + uid())) {
+        if (!fs::create_directory(native_path(staging_)))
+            throw ApiError(409, "无法创建独立的导出暂存目录");
+    }
+    DeliverableExport(const DeliverableExport&) = delete;
+    ~DeliverableExport() {
+        std::error_code ignored;
+        fs::remove_all(native_path(staging_), ignored);
+    }
+    fs::path payload() const { return staging_ / L"payload"; }
+    fs::path publish(const fs::path &name, bool folder) const {
+        const auto stem = folder ? name.wstring() : name.stem().wstring();
+        const auto extension = folder ? std::wstring{} : name.extension().wstring();
+        const auto source = native_path(payload());
+        for (std::uint64_t number = 1; ; ++number) {
+            const auto candidate = staging_.parent_path() / (number == 1 ? name.wstring() :
+                stem + L" (" + std::to_wstring(number) + L")" + extension);
+            const auto destination = native_path(candidate);
+            if (MoveFileExW(source.c_str(), destination.c_str(), 0)) return candidate;
+            const auto error = GetLastError();
+            if (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS) continue;
+            if (error == ERROR_ACCESS_DENIED && GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES)
+                continue;
+            throw ApiError(500, "无法保存导出结果，Windows 错误码 " + std::to_string(error));
+        }
+    }
+private:
+    fs::path staging_;
+};
 std::string iso(std::int64_t ms) {
     // Archives retain the full signed int64 source value. UI dates have a
     // smaller range; return no display date rather than inventing one.
@@ -624,6 +684,9 @@ class Meta {
         std::lock_guard l(mutex_);
         return fn(value_);
     }
+    bool boolean(std::string_view key, bool fallback = false) const {
+        return read([&](const Json& m) { return flag(m, key, fallback); });
+    }
     std::uint64_t epoch() const noexcept {
         return epoch_.load(std::memory_order_acquire);
     }
@@ -828,13 +891,13 @@ class Application::Impl {
         return id;
     }
     bool chat_thinking_enabled() const {
-        return flag(meta.get(), "chatThinkingEnabled");
+        return meta.boolean("chatThinkingEnabled");
     }
     bool chat_auto_web_lookup_enabled() const {
-        return flag(meta.get(), "chatAutoWebLookup", true);
+        return meta.boolean("chatAutoWebLookup", true);
     }
     bool lore_auto_learn_enabled() const {
-        return flag(meta.get(), "loreAutoLearn", true);
+        return meta.boolean("loreAutoLearn", true);
     }
     static ModelTool chat_web_lookup_tool() {
         return {
@@ -912,7 +975,14 @@ class Application::Impl {
                 cfg.thinking_enabled = true;
             } else {
                 cfg.thinking_enabled = false;
-                if (cfg.reasoning_effort.empty()) {
+                auto has_effort_suffix = [](std::string_view m) {
+                    std::string low;
+                    low.reserve(m.size());
+                    for (unsigned char c : m) low.push_back(static_cast<char>(std::tolower(c)));
+                    return low.ends_with("-xhigh") || low.ends_with("-high") ||
+                           low.ends_with("-medium") || low.ends_with("-low") || low.ends_with("-max");
+                };
+                if (cfg.reasoning_effort.empty() && !has_effort_suffix(cfg.cli_native_model)) {
                     cfg.reasoning_effort = "low";
                 }
             }
@@ -1281,7 +1351,7 @@ class Application::Impl {
             {"reclaimableBytes", static_cast<double>(reclaimable)},
             {"protectedBytes", static_cast<double>(t.protected_bytes)},
             {"workDays", static_cast<double>(std::clamp(work_days, 0, 365))},
-            {"autoCleanEnabled", flag(meta.get(), "storageAutoClean")},
+            {"autoCleanEnabled", meta.boolean("storageAutoClean")},
             {"categories", std::move(cats)}
         };
     }
@@ -1318,7 +1388,7 @@ class Application::Impl {
         if (only_when_empty) {
             std::error_code ec;
             if (options.ui.empty() || !fs::is_directory(options.ui / L"default-avatars", ec)) return O{{"seeded", false}};
-            if (!store.list_bots().empty() || flag(meta.get(), "defaultRosterSeeded")) return O{{"seeded", false}};
+            if (!store.list_bots().empty() || meta.boolean("defaultRosterSeeded")) return O{{"seeded", false}};
         }
         int created_bots = 0;
         std::vector<std::string> member_ids;
@@ -1724,6 +1794,7 @@ class Application::Impl {
         if (!fs::is_regular_file(options.ui / L"index.html"))
             throw std::runtime_error("--ui must contain the existing frontend index.html");
         bootstrap_metadata();
+        configure_network_proxy_sandbox(options.wsl, options.sandbox_distribution);
         {
             const auto saved_proxy = NetworkProxySettings::from_json(obj(meta.get(), "networkProxy"));
             (void)apply_network_proxy_settings(saved_proxy);
@@ -2117,7 +2188,7 @@ class Application::Impl {
         try { (void)seed_default_ai_roster(true); } catch (...) {}
         chat->start();
         harvest = std::jthread([this](std::stop_token stop) {
-            if (!stop.stop_requested() && flag(meta.get(), "storageAutoClean")) {
+            if (!stop.stop_requested() && meta.boolean("storageAutoClean")) {
                 try { (void)clean_storage_categories({"old_releases", "runtime_caches"}, 14); } catch (...) {}
             }
             while (!stop.stop_requested()) {
@@ -2144,6 +2215,32 @@ class Application::Impl {
             try {
                 if (configured_cli_auto_warm()) {
                     (void)cached_cli_harnesses(false);
+                    // Prewarm the active bot's native CLI reception engine (kimi-code / antigravity) in background
+                    // so first-turn cold startup (~5-14s auth/config RPC) finishes before the user even sends a message.
+                    const auto m = meta.get();
+                    const std::string sel_bot = str(m, "selectedBot");
+                    const auto bots_obj = obj(m, "bots");
+                    auto try_prewarm_selection = [&](const Json& sel) -> bool {
+                        if (!is_cli_model_selection(sel)) return false;
+                        const std::string eng = extract_cli_engine_from_selection(sel);
+                        if (eng != "antigravity" && eng != "kimi-code") return false;
+                        const std::string raw_m = str(sel, "model");
+                        std::string eff = str(sel, "reasoningEffort");
+                        if (!chat_thinking_enabled() && eff.empty()) eff = "low";
+                        prewarm_cli_reception_engine(eng, options.data, options.data.parent_path(),
+                                                     options.wsl, options.sandbox_distribution,
+                                                     configured_cli_execution_policy(), raw_m, eff);
+                        return true;
+                    };
+                    bool warmed = false;
+                    if (!sel_bot.empty()) {
+                        warmed = try_prewarm_selection(obj(obj(bots_obj, sel_bot), "modelSelection"));
+                    }
+                    if (!warmed && bots_obj.is_object()) {
+                        for (const auto& [_, bentry] : bots_obj.as_object()) {
+                            if (try_prewarm_selection(obj(bentry, "modelSelection"))) break;
+                        }
+                    }
                 }
             } catch (...) {}
         });
@@ -2341,6 +2438,7 @@ class Application::Impl {
         std::string active_directive;
         std::string pending_directive;
         int chapter_counter = 0;
+        int last_fork_chapter = 0;
         std::vector<StoryNodeRecord> nodes;
         StoryPendingFork pending_fork;
         std::vector<StorySkippedRange> skipped_ranges;
@@ -2424,6 +2522,7 @@ class Application::Impl {
         out.pending_directive = str(cfg, "pendingDirective");
         if (const auto *cc = cfg.find("chapterCounter"); cc && cc->is_number())
             out.chapter_counter = std::max(0, static_cast<int>(cc->as_number()));
+        out.last_fork_chapter = static_cast<int>(num(cfg, "lastForkChapter", 0));
         if (const auto *rc = cfg.find("roleCast"); rc && rc->is_array()) {
             for (const auto &item : rc->as_array()) {
                 if (!item.is_object()) continue;
@@ -2969,6 +3068,23 @@ class Application::Impl {
         if (found == scheduler_jobs.end()) return;
         auto row = found->second.as_object(); row["runId"] = run; found->second = std::move(row);
     }
+    std::string submit_group_job(const RunExecutionContext& ctx, const std::string& call_id,
+                                 const Job& job, const Json& spec, const Json& route,
+                                 const std::string& context) {
+        const auto request = "delegate:" + ctx.run_id + ":" + call_id + ":" + job.id;
+        const auto id = work->submit(job.bot_id, ctx.group_id, str(spec, "text") + context,
+                                     request, true, {}, route).run_id;
+        observe_scheduled_job(ctx, call_id, job.id, spec, JobState::running, "已提交");
+        bind_scheduled_run(ctx, call_id, job.id, id);
+        meta.edit([&](O& m) {
+            auto& children = m["children"];
+            if (!children.is_object()) children = O{};
+            children[id] = O{{"child", true}, {"parent", ctx.run_id}, {"job", job.id},
+                             {"delegationId", call_id}, {"dependencies", spec.find("dependencies")
+                                 ? spec.at("dependencies") : Json(A{})}};
+        });
+        return id;
+    }
     Json group_job_view(const std::string& id, const Json& group_value) {
         std::set<std::string> members;
         for (const auto& member : group_value.at("members").as_array()) members.insert(member.as_string());
@@ -3099,12 +3215,17 @@ class Application::Impl {
         if (!is_valid_cli_engine_id(eng) || eng == "auto" || eng == "builtin") {
             throw ApiError(409, "接待模型选定的本机 CLI 引擎无效，请在模型设置中重新选择");
         }
-        const auto harnesses = cached_cli_harnesses(false);
-        const CliHarnessDescriptor* found = nullptr;
-        for (const auto& h : harnesses) {
-            if (h.id == eng) { found = &h; break; }
+        auto find_installed = [&](const std::vector<CliHarnessDescriptor>& list) -> std::optional<CliHarnessDescriptor> {
+            for (const auto& h : list) {
+                if (h.id == eng && h.installed) return h;
+            }
+            return std::nullopt;
+        };
+        auto found = find_installed(cached_cli_harnesses(false));
+        if (!found) {
+            found = find_installed(cached_cli_harnesses(true));
         }
-        if (!found || !found->installed) {
+        if (!found) {
             throw ApiError(409, "接待模型选定的本机 Code CLI（" + eng + "）未安装或不可用，请在模型设置中选择已安装引擎或切回维度 API");
         }
         ModelConfig cfg;
@@ -3127,7 +3248,14 @@ class Application::Impl {
         if (cfg.context_feature == "chat" || cfg.context_feature == "group") {
             const bool think_on = chat_thinking_enabled();
             cfg.thinking_enabled = think_on;
-            if (!think_on && cfg.reasoning_effort.empty()) {
+            auto model_has_effort_suffix = [](std::string_view m) {
+                std::string low;
+                low.reserve(m.size());
+                for (unsigned char c : m) low.push_back(static_cast<char>(std::tolower(c)));
+                return low.ends_with("-xhigh") || low.ends_with("-high") ||
+                       low.ends_with("-medium") || low.ends_with("-low") || low.ends_with("-max");
+            };
+            if (!think_on && cfg.reasoning_effort.empty() && !model_has_effort_suffix(cfg.cli_native_model)) {
                 cfg.reasoning_effort = "low";
             }
         } else {
@@ -3137,6 +3265,10 @@ class Application::Impl {
         cfg.max_output_tokens = 16384;
         cfg.timeout_ms = (cfg.context_feature == "chat" || cfg.context_feature == "group") ? 180000 : 300000;
         return cfg;
+    }
+    static void apply_selected_effort(ModelConfig& config, const Json& selection) {
+        const auto level = str(selection, "reasoningEffort");
+        if (level == "low" || level == "medium" || level == "high") config.reasoning_effort = level;
     }
     ModelConfig model_for(std::string id, std::string level, bool route = true) {
         auto m = meta.get();
@@ -3160,6 +3292,7 @@ class Application::Impl {
         c.model = str(selection, "model", str(obj(e, "spec"), "model", "deepseek-flash"));
         c.protocol = str(e, "kind").find("responses") != std::string::npos ? "responses" : "chat-completions";
         c.max_output_tokens = static_cast<int>(num(obj(e, "spec"), "maxTokens", 4096));
+        apply_selected_effort(c, selection);
         return c;
     }
     ModelConfig configuration(const RunExecutionContext &ctx);
@@ -3392,23 +3525,74 @@ class Application::Impl {
     }
 
     std::string canvas_route_issue(const std::string& canvas_id, const CanvasNode& node) {
+        (void)canvas_id;
         if (node.type != "agent") return {};
         const bool cli = node.engine_kind == "cli";
-        if (node.requires_workspace && !cli) return "此节点需要操作项目文件或运行命令，请选择 CLI";
-        if (!canvas_id.starts_with("grp-bp-") || node.id == "bp-lead-final") return {};
-        const auto settings = obj(meta.get(), "workModels");
-        const auto* pool = settings.find("pool");
-        if (!pool || pool->as_array().empty()) return {};
-        const Json choice = O{{"engineId", cli ? node.cli_engine_id : ""},
-                              {"providerId", cli ? node.cli_native_provider : node.provider_id},
-                              {"model", cli ? node.cli_native_model : node.model}};
-        if ((cli && node.cli_model_source != "native") ||
-            std::none_of(pool->as_array().begin(), pool->as_array().end(),
-                [&](const Json& entry){ return pool_key(entry) == pool_key(choice); }))
-            return "该节点的组合已不在群聊允许池，请重新选择";
-        if (cli && !has_installed_cli_harness(node.cli_engine_id))
-            return "所选 CLI 当前不可用，请重新选择";
+        if (node.requires_workspace && !cli) return "此节点需要操作项目文件或运行命令，请选择 CLI（或取消勾选工作区要求）";
+        if (cli && !has_installed_cli_harness(node.cli_engine_id.empty() ? "auto" : node.cli_engine_id))
+            return "所选 CLI 当前不可用，请重新选择或前往设置下载";
         return {};
+    }
+
+    static Json parse_review_verdict_json(const std::string& raw) {
+        auto trim_ws = [](std::string_view sv) -> std::string_view {
+            while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
+            while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
+            return sv;
+        };
+        const auto trimmed = trim_ws(raw);
+        if (trimmed.empty()) throw std::runtime_error("审查回复为空");
+        // 1. Direct parse
+        try {
+            auto j = Json::parse(std::string(trimmed));
+            if (j.is_object()) return j;
+        } catch (...) {}
+
+        // 2. Strip Markdown code fence ```json ... ``` / ``` ... ```
+        if (const auto f_open = trimmed.find("```"); f_open != std::string_view::npos) {
+            auto body_start = trimmed.find('\n', f_open + 3);
+            if (body_start != std::string_view::npos) {
+                ++body_start;
+                const auto f_close = trimmed.find("```", body_start);
+                const auto inner = trim_ws(f_close == std::string_view::npos
+                    ? trimmed.substr(body_start)
+                    : trimmed.substr(body_start, f_close - body_start));
+                try {
+                    auto j = Json::parse(std::string(inner));
+                    if (j.is_object()) return j;
+                } catch (...) {}
+            }
+        }
+
+        // 3. Balanced top-level JSON object scanner (respects quoted strings & escapes)
+        for (std::size_t i = 0; i < trimmed.size(); ++i) {
+            if (trimmed[i] != '{') continue;
+            int depth = 0;
+            bool in_str = false;
+            bool esc = false;
+            for (std::size_t j = i; j < trimmed.size(); ++j) {
+                const char ch = trimmed[j];
+                if (in_str) {
+                    if (esc) esc = false;
+                    else if (ch == '\\') esc = true;
+                    else if (ch == '"') in_str = false;
+                    continue;
+                }
+                if (ch == '"') { in_str = true; continue; }
+                if (ch == '{') ++depth;
+                else if (ch == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        try {
+                            auto parsed = Json::parse(std::string(trimmed.substr(i, j - i + 1)));
+                            if (parsed.is_object()) return parsed;
+                        } catch (...) {}
+                        break;
+                    }
+                }
+            }
+        }
+        throw std::runtime_error("审查回执未包含有效 JSON 对象");
     }
 
     void review_member_delivery(const CanvasNodeExecRequest& req, CanvasNodeExecResult& result, std::stop_token stop) {
@@ -3433,10 +3617,23 @@ class Application::Impl {
                 {"user",evidence.dump(),{},{}}};
             const auto reply=budgeted_model("work",cfg,messages,{}, {},stop);
             if (stop.stop_requested()) { result.cancelled=true; result.ok=false; return; }
-            auto verdict=Json::parse(reply.text);
-            const auto reason=text_preview(str(verdict,"reason"),500);
-            if (!verdict.at("pass").is_bool() || reason.empty()) throw std::runtime_error("审查回执格式无效");
-            result.ok=result.ok && verdict.at("pass").as_bool();
+            auto verdict = parse_review_verdict_json(reply.text);
+            const auto* pass_field = verdict.find("pass");
+            bool pass_ok = false;
+            if (pass_field && pass_field->is_bool()) {
+                pass_ok = pass_field->as_bool();
+            } else if (pass_field && pass_field->is_string()) {
+                std::string low = pass_field->as_string();
+                for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (low == "true" || low == "yes" || low == "pass") pass_ok = true;
+                else if (low == "false" || low == "no" || low == "fail") pass_ok = false;
+                else throw std::runtime_error("审查回执 pass 字段无效");
+            } else {
+                throw std::runtime_error("审查回执缺少 pass 字段");
+            }
+            std::string reason = text_preview(str(verdict, "reason"), 500);
+            if (reason.empty()) reason = pass_ok ? "已通过群主验收" : "未满足节点职责或验收要求";
+            result.ok = result.ok && pass_ok;
             if (!result.ok) result.error=(original_error.empty()?"":original_error+"；")+"群主审查："+reason;
             work->custom_event(ctx,"blueprint_step",O{{"nodeKey",req.frame_prefix+req.node.id},{"status",result.ok?"review_passed":"review_blocked"},
                 {"text","群主审查「"+req.node.title+"」"+(result.ok?"通过：":"待处理：")+reason}});
@@ -3609,7 +3806,8 @@ class Application::Impl {
                     }
                 } catch (const std::exception& ex) { out.error=ex.what(); return out; }
             }
-            if (node.reasoning_effort == "low" || node.reasoning_effort == "medium" || node.reasoning_effort == "high") {
+            if (node.reasoning_effort == "low" || node.reasoning_effort == "medium" || node.reasoning_effort == "high" ||
+                node.reasoning_effort == "xhigh" || node.reasoning_effort == "max") {
                 hreq.work_slot_model.thinking_enabled = true;
                 hreq.work_slot_model.reasoning_effort = node.reasoning_effort;
             }
@@ -4357,7 +4555,15 @@ class Application::Impl {
         }
         auto fresh = discover_cli_harnesses(
             options.data.parent_path(), options.wsl, options.sandbox_distribution, policy);
+        auto any_sandbox_installed = [](const std::vector<CliHarnessDescriptor>& v) {
+            for (const auto& h : v) if (h.sandbox_installed) return true;
+            return false;
+        };
         std::lock_guard lk(cli_harness_cache_mutex);
+        if (!any_sandbox_installed(fresh) && any_sandbox_installed(cli_harness_cache) &&
+            cli_harness_cache_policy == policy && !force_refresh) {
+            return cli_harness_cache;
+        }
         cli_harness_cache = fresh;
         cli_harness_cache_at = std::chrono::steady_clock::now();
         cli_harness_cache_policy = policy;
@@ -4729,7 +4935,7 @@ class Application::Impl {
     void emit_task_notification(const std::string&, const std::string&, const std::string&,
                                 const std::string&, const std::string&);
     Json run_event(const Json &);
-    Json run_view(const std::string &, bool = true, std::uint64_t = 0);
+    Json run_view(const std::string &, bool = true, std::uint64_t = 0, const Json* relationships = nullptr);
     HttpResponse run_stream(const std::string &, std::uint64_t);
     Json artifacts(const std::string &);
     TaskHandoffPackage task_handoff(const std::string &, bool);
@@ -4950,6 +5156,7 @@ std::vector<ModelRoute> Application::Impl::model_routes(const RunExecutionContex
         if (!value) throw ApiError(409, "工作模型路线引用的接口不可用，请检查模型设置");
         const auto entry = obj(*value, "entry"), spec = obj(entry, "spec");
         auto config = work_model_configuration(id, str(selection, "model", str(spec, "model")));
+        apply_selected_effort(config, selection);
         config.context_feature = level == 2 ? "complex" : "work";
         if (!model_config_ready(config)) throw ApiError(409, "工作模型路线尚未配置完整");
         return {tier, id, std::move(config)};
@@ -4963,7 +5170,7 @@ std::vector<ModelRoute> Application::Impl::model_routes(const RunExecutionContex
         const auto picker_prov = str(picker_spec, "providerId");
         const auto picker_model = str(picker_spec, "model");
         if (picker_src == "work" && !picker_prov.empty() && !picker_model.empty() && providers.find(picker_prov)) {
-            primary_selection = O{{"providerId", picker_prov}, {"model", picker_model}};
+            primary_selection = picker_spec;
         }
     }
     std::string initial_tier=enabled?tiers[level]:"member";
@@ -5033,10 +5240,12 @@ ModelConfig Application::Impl::work_model_configuration(const std::string& id, c
     return config;
 }
 std::size_t Application::Impl::model_context_window(std::string_view feature, const ModelConfig& config) {
-    (void)config;
     const auto raw = static_cast<std::size_t>(num(obj(meta.get(), "contextLimits"), feature,
         feature == "complex" || feature == "work" ? 1048576 : 32768));
-    return std::clamp<std::size_t>(raw, 4096U, 2097152U);
+    const auto configured = std::clamp<std::size_t>(raw, 4096U, 2097152U);
+    if ((feature == "work" || feature == "complex") && config.context_window_tokens > 0)
+        return std::min(configured, config.context_window_tokens);
+    return configured;
 }
 ModelReply Application::Impl::budgeted_model(std::string_view feature, const ModelConfig &config,
                                              const std::vector<ModelMessage> &source,
@@ -5475,7 +5684,7 @@ std::vector<ModelTool> Application::Impl::tool_specs(const RunExecutionContext &
                        {"profileId"})});
         }
     }
-    if (!obj(meta.get(), "skills").as_object().empty() || flag(meta.get(), "pluginsUsed")) {
+    if (!obj(meta.get(), "skills").as_object().empty() || meta.boolean("pluginsUsed")) {
         v.push_back({"list_skills", "查看已启用的共享 Skill 名称和简介；正文按需读取", schema({}, {})});
         v.push_back({"read_skill", "读取一个 Skill 的当前正文，不执行其中的脚本",
                      schema({{"skillId", string}, {"pluginId", string}}, {"skillId"})});
@@ -5554,7 +5763,7 @@ std::vector<ModelTool> Application::Impl::tool_specs(const RunExecutionContext &
         v.push_back({"team_status", "读取当前群主任务的全部分派状态。等待成员时传waitSeconds=30进行可取消长等待，减少轮询；预算耗尽或失败时如实报告。完成后从本工具收据复制artifacts和verification进行汇总验收",
             schema({{"waitSeconds", O{{"type", "integer"}, {"minimum", 0}, {"maximum", 30}}}}, {})});
     }
-    if (plugins_available() && flag(meta.get(), "pluginsUsed")) {
+    if (plugins_available() && meta.boolean("pluginsUsed")) {
         auto catalog_request = O{{"action", "tools.list"}};
         auto context = plugin_context(ctx);
         catalog_request.insert(context.begin(), context.end());
@@ -6087,7 +6296,7 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
                                {"name", str(s, "title")},
                                {"description", "用户共享 Skill"},
                                {"keywords", obj(s, "keywords")}});
-        if (plugins_available() && flag(meta.get(), "pluginsUsed")) {
+        if (plugins_available() && meta.boolean("pluginsUsed")) {
             auto skill_request = O{{"action", "skill.list"}};
             auto context = plugin_context(ctx);
             skill_request.insert(context.begin(), context.end());
@@ -6366,46 +6575,33 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
                 if (active(r))
                     throw ApiError(409, "该成员仍有任务，请选择空闲成员：" + j.bot_id);
         }
+        std::vector<std::size_t> dependency_order;
+        try { dependency_order = job_dependency_order(jobs); }
+        catch (const std::invalid_argument& error) { throw ApiError(400, error.what()); }
         A details;
-        auto link_child = [&](const Job &j, const std::string &run_id) {
-            bind_scheduled_run(ctx, call.id, j.id, run_id);
-            meta.edit([&](O &m) {
-                auto children = obj(m, "children").as_object();
-                A dependencies;
-                for (const auto& dependency : j.dependencies) dependencies.emplace_back(dependency);
-                children[run_id] = O{{"child", true}, {"parent", ctx.run_id}, {"job", j.id},
-                                        {"delegationId", call.id}, {"dependencies", std::move(dependencies)}};
-                m["children"] = children;
-            });
-        };
-        const std::string zero_loss_ctx = options.provider_file.empty() ? work_input_context(ctx.run_id) : std::string{};
-        const auto pinned=report_dispatch(ctx,args.at("jobs"),false,stop);
-        auto submit_job = [&](const Job &j, const std::string &extra) {
-            auto sub = work->submit(j.bot_id, ctx.group_id, str(spec.at(j.id), "text") + extra + zero_loss_ctx,
-                                    "delegate:" + ctx.run_id + ":" + call.id + ":" + j.id, true,{},pinned.at(j.id));
-            observe_scheduled_job(ctx, call.id, j.id, spec.at(j.id), JobState::running, "已提交");
-            link_child(j, sub.run_id);
-            return sub.run_id;
-        };
+        const std::string initial_context = work_input_context(ctx.run_id);
+        const auto pinned = report_dispatch(ctx, args.at("jobs"), false, stop);
         std::map<std::string, std::string> accepted;
         std::vector<Job> waiting_jobs;
         for (auto &j : jobs) {
             if (j.dependencies.empty()) {
-                auto run_id = submit_job(j, "");
+                auto run_id = submit_group_job(ctx, call.id, j, spec.at(j.id), pinned.at(j.id), initial_context);
                 accepted[j.id] = run_id;
                 details.push_back(O{{"id", j.id}, {"botId", j.bot_id}, {"runId", run_id}, {"status", "accepted"}});
             } else {
                 observe_scheduled_job(ctx, call.id, j.id, spec.at(j.id), JobState::waiting, "等待依赖完成");
-                waiting_jobs.push_back(j);
+
                 details.push_back(O{{"id", j.id}, {"botId", j.bot_id}, {"runId", ""}, {"status", "waiting"}});
             }
         }
+        for (const auto index : dependency_order)
+            if (!jobs[index].dependencies.empty()) waiting_jobs.push_back(jobs[index]);
         if (!waiting_jobs.empty()) {
             std::lock_guard l(delegation_mutex);
             launch_followup_locked([this, ctx, call_id = call.id, spec, waiting_jobs, accepted,pinned](std::stop_token cancel) mutable {
                 std::set<std::string> blocked;
-                try {
-                    for (auto &j : waiting_jobs) {
+                for (const auto& j : waiting_jobs) {
+                    try {
                         if (cancel.stop_requested() || stopping.load()) break;
                         std::string extra;
                         bool ready = false, dependency_failed = false;
@@ -6433,22 +6629,14 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
                             blocked.insert(j.id);
                             continue;
                         }
-                        const auto latest_context = options.provider_file.empty() ? work_input_context(ctx.run_id) : std::string{};
-                        auto run_id = work->submit(j.bot_id, ctx.group_id, str(spec.at(j.id), "text") + extra + latest_context,
-                                                   "delegate:" + ctx.run_id + ":" + call_id + ":" + j.id, true,{},pinned.at(j.id)).run_id;
-                        accepted[j.id] = run_id;
-                        observe_scheduled_job(ctx, call_id, j.id, spec.at(j.id), JobState::running, "已提交");
-                        bind_scheduled_run(ctx, call_id, j.id, run_id);
-                        meta.edit([&](O &m) {
-                            auto children = obj(m, "children").as_object();
-                            A dependencies;
-                            for (const auto& dependency : j.dependencies) dependencies.emplace_back(dependency);
-                            children[run_id] = O{{"child", true}, {"parent", ctx.run_id}, {"job", j.id},
-                                                    {"delegationId", call_id}, {"dependencies", std::move(dependencies)}};
-                            m["children"] = children;
-                        });
+                        const auto latest_context = work_input_context(ctx.run_id);
+                        accepted[j.id] = submit_group_job(ctx, call_id, j, spec.at(j.id), pinned.at(j.id),
+                                                          extra + latest_context);
+                    } catch (const std::exception& error) {
+                        blocked.insert(j.id);
+                        observe_scheduled_job(ctx, call_id, j.id, spec.at(j.id), JobState::failed, error.what());
                     }
-                } catch (...) {}
+                }
             });
         }
         result.result = Json(details).dump();
@@ -6784,7 +6972,8 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
                         } catch (...) {}
                     }
                     const auto cfg_effort = str(specific, "reasoningEffort");
-                    if (cfg_effort == "low" || cfg_effort == "medium" || cfg_effort == "high") {
+                    if (cfg_effort == "low" || cfg_effort == "medium" || cfg_effort == "high" ||
+                        cfg_effort == "xhigh" || cfg_effort == "max") {
                         hreq.work_slot_model.thinking_enabled = true;
                         hreq.work_slot_model.reasoning_effort = cfg_effort;
                     } else {
@@ -6794,7 +6983,8 @@ ToolExecution Application::Impl::execute_tool(const ToolCall &call, const RunExe
                     hreq.native_provider = str(specific, "providerId");
                     hreq.native_model = str(specific, "model");
                     const auto cfg_effort = str(specific, "reasoningEffort");
-                    if (cfg_effort == "low" || cfg_effort == "medium" || cfg_effort == "high") {
+                    if (cfg_effort == "low" || cfg_effort == "medium" || cfg_effort == "high" ||
+                        cfg_effort == "xhigh" || cfg_effort == "max") {
                         hreq.work_slot_model.reasoning_effort = cfg_effort;
                     } else {
                         hreq.work_slot_model.reasoning_effort.clear();
@@ -7579,6 +7769,8 @@ void Application::Impl::start_group_chat(const std::string &id, const std::strin
                              }
                          }
                          const int next_chapter = live_cfg.chapter_counter + 1;
+                         const bool allow_fork = request_fork && !opening && !is_finale &&
+                             next_chapter - live_cfg.last_fork_chapter >= 3;
                          const std::string directive_for_beat = !live_cfg.pending_directive.empty()
                              ? live_cfg.pending_directive : live_cfg.active_directive;
                          StoryNarratorExtras nar_extras;
@@ -7594,7 +7786,7 @@ void Application::Impl::start_group_chat(const std::string &id, const std::strin
                          nar_extras.is_finale = is_finale;
                          const auto nar_sys = build_story_narrator_prompt(
                              live_cfg.premise, spotlight_mode, actor_names, opening, nar_name, nar_persona,
-                             active_story_cast, directive_for_beat, is_finale ? false : request_fork, next_chapter, nar_extras);
+                             active_story_cast, directive_for_beat, allow_fork, next_chapter, nar_extras);
                          const std::string nar_pov_id = bot_narrator ? live_cfg.narrator_bot_id : "__system_narrator__";
                          const auto nar_msgs = build_group_pov_messages(nar_pov_id, nar_sys, history_items);
                          auto nar_model = model_for(model_owner, "simple", false);
@@ -7625,14 +7817,9 @@ void Application::Impl::start_group_chat(const std::string &id, const std::strin
                          const auto raw_nar = strip_speaker_prefix(reply.text, nar_name);
                          if (raw_nar.empty() || raw_nar == "[[silent]]") return false;
                          auto parsed = parse_story_narrator_output(raw_nar);
-                         if (!is_finale && request_fork && parsed.choices.empty()) {
-                             // Guarantee interactive fate-fork choices when the model occasionally omits [[FORK]]
-                             parsed.fork_prompt = "命运在此分岔，选择或自定义下一幕走向：";
-                             parsed.choices = {
-                                 {"A", "顺势推进：顺着刚才的悬念与众人动作继续深挖，直面即将浮出水面的真相"},
-                                 {"B", "意外转折：突发变故打破眼下僵局，局势瞬间出现意想不到的逆转"},
-                                 {"C", "暗线浮现：有角色亮出隐藏底牌或关键线索，把故事引向全新分支"},
-                             };
+                         if (!allow_fork || parsed.choices.size() < 2) {
+                             parsed.choices.clear();
+                             parsed.fork_prompt.clear();
                          }
                          if (is_finale && !parsed.ending.has_ending) {
                              parsed.ending.has_ending = true;
@@ -7676,6 +7863,7 @@ void Application::Impl::start_group_chat(const std::string &id, const std::strin
                              auto cfgs = obj(m, "groupStoryConfigs").as_object();
                              auto cur = obj(cfgs, id).as_object();
                              cur["chapterCounter"] = static_cast<double>(next_chapter);
+                             if (!parsed.choices.empty()) cur["lastForkChapter"] = static_cast<double>(next_chapter);
                              if (!live_cfg.pending_directive.empty()) {
                                  cur["activeDirective"] = live_cfg.pending_directive;
                                  cur["pendingDirective"] = "";
@@ -7739,7 +7927,7 @@ void Application::Impl::start_group_chat(const std::string &id, const std::strin
                                      {"prompt", parsed.fork_prompt.empty() ? "命运在此分岔，选择或自定义下一幕走向：" : parsed.fork_prompt},
                                      {"choices", std::move(ch_arr)}
                                  };
-                             } else if (!request_fork) {
+                             } else {
                                  cur["pendingFork"] = O{{"prompt", ""}, {"choices", A{}}};
                              }
                              cfgs[id] = std::move(cur);
@@ -8580,9 +8768,10 @@ Json Application::Impl::run_event(const Json &e) {
     out.push_back(v);
     return out;
 }
-Json Application::Impl::run_view(const std::string &id, bool details, std::uint64_t after) {
-    auto r = work->brief_json(id).as_object();
-    const auto children = obj(meta.get(), "children");
+Json Application::Impl::run_view(const std::string &id, bool details, std::uint64_t after, const Json* relationships) {
+    auto r = work->brief_json(id);
+    const auto owned_children = relationships ? Json() : meta.read([](const Json& m) { return obj(m, "children"); });
+    const auto& children = relationships ? *relationships : owned_children;
     // Relations come from persisted delegation metadata, never from group membership.
     // A removed/missing parent leaves its surviving work and files independently visible.
     r["parentRunId"] = "";
@@ -8596,7 +8785,7 @@ Json Application::Impl::run_view(const std::string &id, bool details, std::uint6
     }
     r["workspace"] = workspaces.describe(id, str(r, "botId"));
     r["sourceRef"] = O{{"runId", id}, {"eventSeq", "1"}};
-    if (const auto found = r.find("inputContext"); found != r.end() && !found->second.is_null()) r["context"] = found->second;
+    if (const auto* context = r.find("inputContext"); context && !context->is_null()) r["context"] = *context;
     // Chat status reads this same durable RunService state. waiting-approval is
     // only a UI projection and never replaces the authoritative raw run status.
     r["runStatus"] = str(r, "status");
@@ -8642,7 +8831,7 @@ Json Application::Impl::run_view(const std::string &id, bool details, std::uint6
         }
         r["lastSeq"] = double(cursor * 2);
     }
-    r["events"] = events;
+    r["events"] = std::move(events);
     A assignments;
     for (auto &[childId, data] : children.as_object())
         if (str(data, "parent") == id) {
@@ -8677,7 +8866,7 @@ Json Application::Impl::run_view(const std::string &id, bool details, std::uint6
                 {"dependsOn", job.find("dependencies") ? job.at("dependencies") : Json(A{})}});
         }
     }
-    r["assignments"] = assignments;
+    r["assignments"] = std::move(assignments);
     return r;
 }
 HttpResponse Application::Impl::run_stream(const std::string &id, std::uint64_t after) {
@@ -8847,10 +9036,19 @@ Json Application::Impl::artifacts(const std::string &id) {
         }
         if (available) {
             try {
-                const auto preview = previews.url(safe);
-                if (!preview.empty()) {
-                    auto entry = files.back().as_object(); entry["previewUrl"] = preview; files.back() = std::move(entry);
+                PreviewService::SnapshotPaths snapshots;
+                fs::path entry;
+                if (const auto* evidence = files.back().find("outputEvidence");
+                    evidence && (ascii_lower(utf8(safe.extension())) == ".html" || ascii_lower(utf8(safe.extension())) == ".htm")) {
+                    entry = path8(str(*evidence, "output")).lexically_normal();
+                    for (const auto& [disk, proof] : proofs.at(artifact_owner).as_object()) {
+                        const auto snapshot = path8(disk);
+                        if (snapshot.parent_path() == safe.parent_path() && str(proof, "callId") == str(*evidence, "callId"))
+                            snapshots.emplace(path8(str(proof, "output")).lexically_normal(), snapshot.filename());
+                    }
                 }
+                const auto preview = previews.url(safe, entry, snapshots);
+                if (!preview.empty()) files.back()["previewUrl"] = preview;
             } catch (...) { /* Keep the downloadable artifact if interactive preview is unavailable. */ }
         }
     }
@@ -10531,7 +10729,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
     if (path == "/api/dimension/network-proxy") {
         if (method == "GET") {
             const auto cfg = NetworkProxySettings::from_json(obj(meta.get(), "networkProxy"));
-            const auto resolved = apply_network_proxy_settings(cfg);
+            const auto resolved = apply_network_proxy_settings(cfg, true);
             return json(O{
                 {"ok", true},
                 {"settings", cfg.to_json()},
@@ -10560,12 +10758,12 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 if (!sb->is_bool()) throw ApiError(400, "沙盒同步选项必须为布尔值");
                 next.apply_to_sandbox = sb->as_bool();
             }
-            if (next.mode == "global") {
+            if (next.mode == "global" && !next.proxy_url.empty()) {
                 const std::string err = validate_global_proxy_url(next.proxy_url);
                 if (!err.empty()) throw ApiError(400, err);
             }
             meta.edit([&](O& m) { m["networkProxy"] = next.to_json(); });
-            const auto resolved = apply_network_proxy_settings(next);
+            const auto resolved = apply_network_proxy_settings(next, true);
             // Recycle persistent CLI daemons so next turn inherits the updated proxy env immediately.
             shutdown_cli_reception_pool();
             return json(O{
@@ -10811,7 +11009,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 cfg_target_entry["providerId"] = str(*cec, "providerId");
                 cfg_target_entry["model"] = str(*cec, "model");
                 const auto eff = str(*cec, "reasoningEffort");
-                if (eff == "low" || eff == "medium" || eff == "high" || eff.empty()) {
+                if (eff == "low" || eff == "medium" || eff == "high" || eff == "xhigh" || eff == "max" || eff.empty()) {
                     cfg_target_entry["reasoningEffort"] = eff;
                 }
                 cli_eng_cfg_updated = true;
@@ -10839,7 +11037,8 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                     work_lead_entry["providerId"] = str(*wl, "providerId");
                     work_lead_entry["model"] = str(*wl, "model");
                     const auto eff = str(*wl, "reasoningEffort");
-                    work_lead_entry["reasoningEffort"] = (eff == "low" || eff == "medium" || eff == "high") ? eff : "";
+                    work_lead_entry["reasoningEffort"] =
+                        (eff == "low" || eff == "medium" || eff == "high" || eff == "xhigh" || eff == "max") ? eff : "";
                 } else {
                     work_lead_entry["mode"] = "api";
                     work_lead_entry["engineId"] = "";
@@ -11128,7 +11327,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
     if (path == "/api/dimension/plugins") {
         if (!plugins_available())
             return json(O{{"plugins", A{}}});
-        if (!flag(meta.get(), "pluginsUsed")) {
+        if (!meta.boolean("pluginsUsed")) {
             std::error_code ec;
             const auto pdir = options.data / L"plugin-data";
             if (!fs::is_directory(pdir, ec) || fs::is_empty(pdir, ec))
@@ -11575,18 +11774,12 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
         }
         Json work_settings = O{{"approvalMode", "auto"}, {"workspaceMode", "auto"}, {"sandboxNetwork", true}, {"projectCwd", Json()}};
         if (!id.empty()) {
-            const auto m_doc = meta.get();
-            const auto saved_ws = obj(obj(m_doc, "botWorkspaceModes"), id);
-            const auto bot_meta = obj(obj(m_doc, "bots"), id);
-            if (!saved_ws.as_object().empty() || !bot_meta.as_object().empty()) {
-                O ws_obj{
-                    {"approvalMode", str(bot_meta, "approvalMode", "auto")},
-                    {"workspaceMode", str(saved_ws, "workspaceMode", "auto")},
-                    {"sandboxNetwork", saved_ws.find("sandboxNetwork") && saved_ws.at("sandboxNetwork").is_bool() ? saved_ws.at("sandboxNetwork").as_bool() : true},
-                    {"projectCwd", str(saved_ws, "projectCwd").empty() ? Json() : Json(str(saved_ws, "projectCwd"))}
-                };
-                work_settings = std::move(ws_obj);
-            }
+            const auto saved = desktops->saved_settings(id);
+            const auto project = str(saved, "projectCwd");
+            work_settings = O{{"approvalMode", str(saved, "approvalMode", "auto")},
+                              {"workspaceMode", configured_workspace_mode(id)},
+                              {"sandboxNetwork", sandbox_network_enabled(id)},
+                              {"projectCwd", project.empty() ? Json() : Json(project)}};
         }
         return json(O{{"productName", "DimensionAgent"},
                       {"chatThinkingEnabled", chat_thinking_enabled()},
@@ -11948,9 +12141,12 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 });
                 if (!is_seal && is_cli_model_selection(saved_val)) {
                     const std::string prewarm_eng = extract_cli_engine_from_selection(saved_val);
+                    const std::string prewarm_model = str(saved_val, "model");
+                    std::string prewarm_eff = str(saved_val, "reasoningEffort");
+                    if (!chat_thinking_enabled() && prewarm_eff.empty()) prewarm_eff = "low";
                     prewarm_cli_reception_engine(prewarm_eng, options.data, options.data.parent_path(),
                                                  options.wsl, options.sandbox_distribution,
-                                                 configured_cli_execution_policy());
+                                                 configured_cli_execution_policy(), prewarm_model, prewarm_eff);
                 }
             }
             auto entry = obj(obj(meta.get(), "bots"), id);
@@ -12604,6 +12800,12 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
             }
             if (const auto* pool = settings.find("pool")) {
                 if (!pool->is_array()) throw ApiError(400, "模型池须为列表");
+                std::set<std::string> saved_cli_models;
+                const auto previous = obj(meta.get(), "workModels");
+                if (const auto* prior = previous.find("pool"); prior && prior->is_array()) {
+                    for (const auto& item : prior->as_array())
+                        if (item.find("engineId")) saved_cli_models.insert(pool_key(item));
+                }
                 std::set<std::string> seen;
                 A normalized;
                 for (const auto& entry : pool->as_array()) {
@@ -12614,7 +12816,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                         const bool custom = flag(entry, "custom");
                         const auto engine = str(entry, "engineId"), native_provider = str(entry,"providerId");
                         if (!cli_models.contains(pool_key(entry)) &&
-                            !(custom && valid_cli_pool_id(model) && (native_provider.empty() || (engine == "hermes" && valid_cli_pool_id(native_provider))) &&
+                            !((custom || saved_cli_models.contains(pool_key(entry))) && valid_cli_pool_id(model) && (native_provider.empty() || (engine == "hermes" && valid_cli_pool_id(native_provider))) &&
                               std::any_of(harnesses.begin(), harnesses.end(), [&](const auto& h){return h.installed && h.id == engine;})))
                             throw ApiError(400, "请选择已安装的 CLI 并检查模型 ID");
                         row = O{{"engineId", str(entry,"engineId")}, {"providerId", str(entry,"providerId")}, {"model", model}};
@@ -12875,47 +13077,30 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                           {"pinned", flag(updated_entry, "pinned")}});
         }
         if (method != "GET") throw ApiError(405, "工作目录只支持GET或POST");
-        auto all_source = work->list("", "", 1000).as_array();
-        const auto m_doc = meta.get();
-        const auto relationships = obj(m_doc, "children");
-        const auto prefs = obj(m_doc, "workCatalogPrefs");
-        std::set<std::string> visible;
-        for (const auto& row : all_source) {
-            if (!flag(row, "deleted")) visible.insert(str(row, "id"));
-        }
-        std::map<std::string, std::string> roots;
-        std::map<std::string, std::size_t> member_counts;
-        for (const auto& row : all_source) {
-            const auto id = str(row, "id");
-            if (!visible.contains(id)) continue;
-            auto root = id;
-            std::set<std::string> visited{id};
-            while (true) {
-                const auto parent = str(obj(relationships, root), "parent");
-                if (parent.empty() || !visible.contains(parent)) break;
-                if (!visited.insert(parent).second) { root = *visited.begin(); break; }
-                root = parent;
-            }
-            roots[id] = root;
-            if (root != id) member_counts[root]++;
-        }
-        std::vector<Json> root_rows;
-        for (const auto& row : all_source) {
-            const auto id = str(row, "id");
-            if (visible.contains(id) && roots[id] == id) root_rows.push_back(row);
-        }
-        std::sort(root_rows.begin(), root_rows.end(), [&](const Json& a, const Json& b) {
-            const auto pa = flag(obj(prefs, str(a, "id")), "pinned");
-            const auto pb = flag(obj(prefs, str(b, "id")), "pinned");
-            if (pa != pb) return pa > pb;
-            const auto ta = str(a, "updatedAt").empty() ? str(a, "createdAt") : str(a, "updatedAt");
-            const auto tb = str(b, "updatedAt").empty() ? str(b, "createdAt") : str(b, "updatedAt");
-            return ta == tb ? str(a, "id") > str(b, "id") : ta > tb;
+        auto all_source = work->list("", "", 1000, RunService::ListView::Catalog).as_array();
+        const auto [relationships, prefs] = meta.read([](const Json& m) {
+            return std::pair{obj(m, "children"), obj(m, "workCatalogPrefs")};
         });
-        A items;
-        std::map<std::string, Json> pending_by_bot;
-        for (const auto& row : root_rows) {
+        // RunService::list already excludes deleted tasks.
+        const auto roots = work_roots(all_source, relationships);
+        std::map<std::string, std::size_t> member_counts;
+        std::vector<WorkListEntry> root_rows;
+        for (const auto& row : all_source) {
             const auto id = str(row, "id");
+            const auto& root = roots.at(id);
+            if (root != id) { ++member_counts[root]; continue; }
+            auto timestamp = str(row, "updatedAt");
+            if (timestamp.empty()) timestamp = str(row, "createdAt");
+            const auto* pref = prefs.find(id);
+            root_rows.push_back({id, std::move(timestamp), &row, pref && flag(*pref, "pinned")});
+        }
+        std::sort(root_rows.begin(), root_rows.end(), work_list_order);
+        A items;
+        items.reserve(root_rows.size());
+        std::map<std::string, Json> pending_by_bot;
+        for (const auto& entry : root_rows) {
+            const auto& row = *entry.row;
+            const auto& id = entry.id;
             const auto bid = str(row, "botId");
             const auto gid = str(row, "groupId");
             const auto proj_path = workspaces.peek_project(id, bid);
@@ -12953,7 +13138,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 {"groupId", gid},
                 {"text", text_preview(str(row, "text"), 160)},
                 {"customTitle", str(pref_entry, "title")},
-                {"pinned", flag(pref_entry, "pinned")},
+                {"pinned", entry.pinned},
                 {"status", status_val},
                 {"createdAt", str(row, "createdAt")},
                 {"updatedAt", str(row, "updatedAt")},
@@ -12967,37 +13152,22 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
     }
     if (path == "/api/dimension/work/sessions") {
         auto bid = str(q, "botId"), gid = str(q, "groupId");
-        auto source = work->list(gid.empty() ? bid : "", gid, 1000).as_array();
-        std::erase_if(source, [&](auto &r) { return str(r, "groupId") != gid; });
-        const auto relationships = obj(meta.get(), "children");
-        std::set<std::string> visible;
-        for (const auto& row : source) visible.insert(str(row, "id"));
-        std::map<std::string, std::string> roots;
-        for (const auto& row : source) {
-            const auto id = str(row, "id");
-            auto root = id;
-            std::set<std::string> visited{id};
-            while (true) {
-                const auto parent = str(obj(relationships, root), "parent");
-                if (parent.empty() || !visible.contains(parent)) break;
-                if (!visited.insert(parent).second) { root = *visited.begin(); break; }
-                root = parent;
-            }
-            roots[id] = root;
+        auto all_runs = work->list(gid.empty() ? bid : "", gid, 1000, RunService::ListView::SessionIndex).as_array();
+        std::erase_if(all_runs, [&](const auto& r) { return str(r, "groupId") != gid; });
+        const auto relationships = meta.read([](const Json& m) { return obj(m, "children"); });
+        const auto roots = work_roots(all_runs, relationships);
+        std::vector<WorkListEntry> source;
+        for (const auto& row : all_runs) {
+            auto id = str(row, "id");
+            if (roots.at(id) == id)
+                source.push_back({std::move(id), str(row, "createdAt"), &row, false});
         }
-        // The bounded source is retained for descendants. Pagination counts tasks,
-        // so a team cannot consume a page with only its separate workers.
-        const auto all_runs = source;
-        std::erase_if(source, [&](const auto& row) { return roots.at(str(row, "id")) != str(row, "id"); });
-        std::sort(source.begin(), source.end(), [](auto &a, auto &b) {
-            return str(a, "createdAt") == str(b, "createdAt") ? str(a, "id") > str(b, "id")
-                                                              : str(a, "createdAt") > str(b, "createdAt");
-        });
+        std::sort(source.begin(), source.end(), work_list_order);
         auto before = str(q, "before");
         if (!before.empty()) {
             if (const auto existing = roots.find(before); existing != roots.end()) before = existing->second;
             auto found =
-                std::find_if(source.begin(), source.end(), [&](auto &r) { return str(r, "id") == before; });
+                std::find_if(source.begin(), source.end(), [&](auto &r) { return r.id == before; });
             if (found == source.end())
                 throw ApiError(400, "历史游标不存在");
             source.erase(source.begin(), found + 1);
@@ -13011,17 +13181,16 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
         if (!str(q, "cursors").empty())
             cursors = Json::parse(str(q, "cursors"));
         std::set<std::string> selected;
-        for (const auto& row : source) selected.insert(str(row, "id"));
+        for (const auto& row : source) selected.insert(row.id);
         for (const auto& r : all_runs) {
             auto id = str(r, "id");
             if (!selected.contains(roots.at(id))) continue;
-            auto view = run_view(id, true, static_cast<std::uint64_t>(num(cursors, id)));
-            runs.push_back(view);
+            runs.push_back(run_view(id, true, static_cast<std::uint64_t>(num(cursors, id)), &relationships));
         }
-        return json(O{{"runs", runs},
+        return json(O{{"runs", std::move(runs)},
                       {"paused", flag(obj(obj(meta.get(), "queues"), bid + ":" + gid), "paused")},
                       {"hasMore", more},
-                      {"before", source.empty() ? Json() : Json(str(source.back(), "id"))}});
+                      {"before", source.empty() ? Json() : Json(source.back().id)}});
     }
     if (path == "/api/dimension/work/queue") {
         auto bid = str(body, "botId"), gid = str(body, "groupId");
@@ -13227,15 +13396,11 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
             if (merged.size() == 1 && merged.begin()->first.find('/') == std::string::npos && !flag(body, "forceFolder")) {
                 const auto& item = merged.begin()->second;
                 const fs::path fname = path8(item.rel);
-                const auto stem = utf8(fname.stem());
-                const auto ext = utf8(fname.extension());
-                fs::path dest = target_base / fname;
-                for (int suffix = 2; fs::exists(native_path(dest), ec) && suffix < 500; ++suffix) {
-                    dest = target_base / path8(stem + " (" + std::to_string(suffix) + ")" + ext);
-                }
                 const auto content = read_file(item.src, 128U * 1024U * 1024U);
                 total_bytes += content.size();
-                atomic_write(dest, content);
+                DeliverableExport staged(target_base);
+                atomic_write(staged.payload(), content);
+                const auto dest = staged.publish(fname, false);
                 return json(O{
                     {"ok", true},
                     {"kind", "file"},
@@ -13263,22 +13428,18 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
             const auto requested_folder = str(body, "folderName");
             const auto folder_seg = sanitize_win_segment(requested_folder.empty() ? default_folder : requested_folder, "成品交付包");
 
-            fs::path folder_dest = target_base / path8(folder_seg);
-            for (int suffix = 2; fs::exists(native_path(folder_dest), ec) && suffix < 500; ++suffix) {
-                folder_dest = target_base / path8(folder_seg + " (" + std::to_string(suffix) + ")");
-            }
-            fs::create_directories(native_path(folder_dest), ec);
+            DeliverableExport staged(target_base);
 
             for (const auto& [rel, item] : merged) {
                 const std::string sub_rel = (has_common_top && !common_top.empty() && rel.size() > common_top.size() + 1)
                     ? rel.substr(common_top.size() + 1)
                     : rel;
-                const fs::path out_file = folder_dest / path8(sub_rel);
-                fs::create_directories(native_path(out_file.parent_path()), ec);
+                const fs::path out_file = staged.payload() / path8(sub_rel);
                 const auto content = read_file(item.src, 128U * 1024U * 1024U);
                 total_bytes += content.size();
                 atomic_write(out_file, content);
             }
+            const auto folder_dest = staged.publish(path8(folder_seg), true);
             return json(O{
                 {"ok", true},
                 {"kind", "folder"},
@@ -13374,9 +13535,18 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                 const auto g = canvas_runtime->get_graph(cid);
                 const auto v = validate_canvas_graph(g);
                 if (!v.ok) throw ApiError(400, "当前蓝图结构有误：" + v.error);
-                for (const auto& node : g.nodes)
-                    if (const auto issue = canvas_route_issue(cid,node); !issue.empty())
-                        throw ApiError(409,node.title + "：" + issue);
+                std::vector<CanvasGraph> pending{g};
+                std::set<std::string> checked{g.id};
+                while (!pending.empty()) {
+                    auto graph = std::move(pending.back());
+                    pending.pop_back();
+                    for (const auto& node : graph.nodes) {
+                        if (const auto issue = canvas_route_issue(cid, node); !issue.empty())
+                            throw ApiError(409, graph.name + " / " + node.title + "：" + issue);
+                        if (node.type == "function_call" && checked.insert(node.function_id).second)
+                            pending.push_back(canvas_runtime->get_graph(node.function_id));
+                    }
+                }
             } catch (const ApiError&) {
                 throw;
             } catch (const std::exception&) {
@@ -14073,6 +14243,7 @@ HttpResponse Application::Impl::route(const HttpRequest &req) {
                     cur["bibleChapter"] = 0.0;
                     cur["endingCard"] = nullptr;
                     cur["chapterCounter"] = 0.0;
+                    cur["lastForkChapter"] = 0.0;
                     cur["nodes"] = A{};
                     cur["skippedRanges"] = latest_chat_msg_id
                         ? A{O{{"fromId", 0.0}, {"toId", static_cast<double>(*latest_chat_msg_id + 1)}}}

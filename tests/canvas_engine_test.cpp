@@ -87,6 +87,20 @@ int main(int argc, char** argv) {
             {"E", "禁止硬编码密钥"}
         };
         const std::string ctx_b = assemble_canvas_node_context(g, "B", "做一个高性能缓存", outs);
+        auto scoped = g;
+        scoped.nodes.back().context_mode = "full_chain";
+        scoped.nodes.push_back(CanvasNode{.id="other", .type="agent"});
+        auto values = outs;
+        values["other"] = "UNRELATED_BRANCH";
+        values["in"] = "EARLY_ANCESTOR";
+        const auto history = assemble_canvas_node_context(scoped, "B", "request", values);
+        check(history.find("EARLY_ANCESTOR") != std::string::npos &&
+              history.find("UNRELATED_BRANCH") == std::string::npos, "full chain includes only ancestors");
+        scoped.nodes.back().prompt = "{{input}} / {{node:A}}";
+        scoped.nodes.back().context_mode = "template_only";
+        values["A"] = "{{node:C}}";
+        check(assemble_canvas_node_context(scoped, "other", "{{prev}}", values) == "{{prev}} / {{node:C}}",
+              "substituted member outputs and input stay literal");
         const auto pos_a = ctx_b.find("主方案正文_ALPHA");
         const auto pos_c_hdr = ctx_b.find("针对「主方案A」的并行补充信息");
         const auto pos_c = ctx_b.find("风险补充正文_CHARLIE");
@@ -245,6 +259,24 @@ int main(int argc, char** argv) {
               call_counts["always_fail_review"] == 3 && // initial + 2 feedback loops
               call_counts["after_fuse"] == 1,
               "circuit breaker trips cleanly after maxIterations=2 loops and releases safely");
+        fuse_g.id = "final-gate";
+        fuse_g.nodes[2].require_pass = true;
+        (void)svc.save_graph(fuse_g);
+        const auto strict_run = svc.start_run({fuse_g.id, "test", "", ""});
+        const auto stopped = wait_run_status(svc, strict_run.at("runId").as_string(), {"completed","failed"});
+        check(stopped.at("status").as_string() == "failed" && call_counts["always_fail_review"] == 6 &&
+              call_counts["after_fuse"] == 1, "final gate blocks delivery after exhausting rework");
+        CanvasGraph verdict;
+        verdict.id = "verdict"; verdict.name = "verdict";
+        verdict.nodes = {CanvasNode{.id="input", .type="input"}, fuse_g.nodes[2]};
+        verdict.edges = {CanvasEdge{"verdict-in", "input", "out", "node", "gate", 0.5, "main", ""}};
+        (void)svc.save_graph(verdict);
+        for (const auto& [text, expected] : std::vector<std::pair<std::string,std::string>>{
+                 {"NOT PASS", "failed"}, {"PASS succeeded?", "failed"}, {"report\n PASS \n", "completed"}}) {
+            const auto run = svc.start_run({verdict.id, text, "", ""});
+            check(wait_run_status(svc, run.at("runId").as_string(), {"completed","failed"}).at("status").as_string()
+                  == expected, "final gate requires an explicit last-line verdict");
+        }
     }
 
     // 3. Human approval gate (reject -> loop -> approve with note) + UE Blueprint Collapse to Function

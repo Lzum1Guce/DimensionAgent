@@ -360,7 +360,9 @@ void prewarm_cli_reception_engine(const std::string& engine_id,
                                   const std::filesystem::path& app_root,
                                   const std::filesystem::path& wsl_executable = {},
                                   const std::string& sandbox_distribution = {},
-                                  const std::string& execution_policy = "sandbox_first");
+                                  const std::string& execution_policy = "sandbox_first",
+                                  const std::string& native_model = {},
+                                  const std::string& reasoning_effort = {});
 
 void shutdown_cli_reception_pool();
 
@@ -374,5 +376,8 @@ ModelReply call_cli_as_work_lead(const ModelConfig& config,
                                  const std::filesystem::path& wsl_executable = {},
                                  const std::string& sandbox_distribution = {},
                                  const std::string& execution_policy = "sandbox_first");
+
+std::vector<std::string> parse_antigravity_models_output(std::string_view raw);
+std::string sanitize_wsl_stderr_line(std::string_view raw);
 
 } // namespace dimension

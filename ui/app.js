@@ -1,3 +1,4 @@
+import { apiEffortLevels, arrangeModels, modelChoice } from './model-catalog-view.js';
 /*
  * DimensionAgent frontend. Copyright (c) 2026 Lzum1Guce.
  * Existing third-party source notices follow.
@@ -949,12 +950,22 @@ function renderModels() {
       <button type="button" class="model-menu-cli-gear" id="modelMenuCliSettingsBtn" data-action="cli-reception-settings" title="打开本机 CLI 设置并查看可使用模型">${cliGearSvg(12)}<span>设置</span></button>
     </div>`;
   const choices = modelChoices();
-  const items = choices.map((row) => {
-    const on = !isCli && current && current.providerId === row.providerId && (current.model || '') === row.model;
-    const value = `${row.providerId}\t${row.model}`;
-    return `<button type="button" class="model-option${on ? ' is-active' : ''}" role="option" data-value="${escapeHtml(value)}" aria-selected="${on ? 'true' : 'false'}"><span class="model-option-name">${escapeHtml(row.label)}</span>${checkIcon}</button>`;
-  }).join('');
-  menu.innerHTML = `<button type="button" class="model-menu-key" id="modelMenuKeyBtn">${keyIcon}<span class="model-menu-key-text">添加或更改密钥</span></button>${cliRowHtml}<div class="model-menu-sep" role="separator"></div>${items}`;
+  menu.innerHTML = `<button type="button" class="model-menu-key" id="modelMenuKeyBtn">${keyIcon}<span class="model-menu-key-text">添加或更改密钥</span></button>${cliRowHtml}<div class="model-menu-sep" role="separator"></div>`;
+  for (const row of choices) {
+    const selected = !isCli && current?.providerId === row.providerId && current?.model === row.model;
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'model-option' + (selected ? ' is-active' : '');
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(Boolean(selected)));
+    option.dataset.value = row.providerId + '\t' + row.model;
+    option.innerHTML = '<span class="model-option-name"></span>' + checkIcon;
+    option.firstChild.textContent = row.label;
+    menu.append(modelChoice(option, {id:row.model, scope:JSON.stringify(['api',row.providerId]), selected,
+      levels:apiEffortLevels(row.model), effort:selected ? current.reasoningEffort : '',
+      apply:effort => { closeModelMenu(); return switchModel({providerId:row.providerId,model:row.model,reasoningEffort:effort},{syncWorkLead:isCli}); }}));
+  }
+  arrangeModels(menu);
 }
 
 function bindModelSwitch() {
@@ -8466,6 +8477,15 @@ function bindUi() {
       workDock?.refreshCanvasLibrary?.();
     } catch {}
   });
+  window.addEventListener('dimension:open-chat-bot', async (event) => {
+    const botId = String(event?.detail?.botId || '').trim();
+    if (!botId) return;
+    try {
+      if (state.shellMode !== 'chat') setShellMode('chat', { restoreSelection: false });
+      await activateBot(botId);
+      await showBotHistory(botId);
+    } catch {}
+  });
   syncChromeCloseTitle();
   bindSidebarCollapse();
   $('pgSidebarExpandBtn')?.addEventListener('click', () => $('sidebarExpandBtn')?.click());
@@ -9287,17 +9307,22 @@ function bindUi() {
     },
     onRefreshCliAndModels: async (optsArg = {}) => {
       const silent = Boolean(optsArg && optsArg.silent);
+      const activeOwner = () => {
+        const group = isWorkShell() && currentGroup();
+        return group?.ownerId || group?.members?.[0] || state.botId;
+      };
+      const botId = activeOwner();
       try {
-        await loadProviders();
-        await refreshCatalogs();
-        const grp = currentGroup();
-        const botId = (isWorkShell() && grp) ? (grp.ownerId || grp.members?.[0] || state.botId) : state.botId;
         if (botId) {
           const data = await api(`/api/dimension/work/settings?botId=${encodeURIComponent(botId)}&refresh=1`);
+          if (botId !== activeOwner()) return;
           if (data?.settings) state.workSettings = data.settings;
+          workUi?.sync();
         }
-        workUi?.sync();
-        if (!silent) messageActionNotice('已刷新本机工匠探测与模型目录');
+        if (!silent) messageActionNotice('已刷新本机 CLI，正在更新远程模型目录');
+        await loadProviders();
+        await refreshCatalogs();
+        if (botId === activeOwner()) workUi?.sync();
       } catch (err) {
         if (!silent) messageActionNotice(`刷新失败：${err.message}`);
       }

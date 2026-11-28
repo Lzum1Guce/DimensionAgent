@@ -38,6 +38,9 @@ using Event = std::function<void(const std::string&, JobState, const std::string
 
 inline constexpr std::size_t max_plan_jobs = 256;
 
+// Validates the complete plan before any job is submitted.
+std::vector<std::size_t> job_dependency_order(const std::vector<Job>& jobs);
+
 const char* job_state_name(JobState state) noexcept;
 
 // Synchronous coordination: callbacks run on this function's calling thread;

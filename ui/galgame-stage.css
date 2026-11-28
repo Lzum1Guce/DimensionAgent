@@ -1834,7 +1834,7 @@
 /* Spotlight active speaker vs clearly dimmed attentive listeners */
 .gal-cast-slot.is-speaking {
   z-index: 22 !important;
-  transform: translateX(-50%) translateY(calc(var(--slot-y, 4%) + var(--char-y, 0%) - 12px)) scale(calc(var(--slot-scale, 0.94) * var(--char-scale, 1) * 1.07));
+  transform: translateX(-50%) translateY(calc(var(--slot-y, 4%) + var(--char-y, 0%) - 12px)) scale(calc(var(--slot-scale, 0.94) * var(--char-scale, 1) * 1.015));
   filter: brightness(1.06) saturate(1.06) drop-shadow(0 0 26px rgba(255, 228, 174, 0.50));
 }
 .gal-cast-slot.is-speaking .gal-cast-tag {
@@ -1845,7 +1845,7 @@
 }
 .gal-cast-slot.is-listening {
   z-index: var(--slot-z, 8);
-  transform: translateX(-50%) translateY(calc(var(--slot-y, 4%) + var(--char-y, 0%) + 6px)) scale(calc(var(--slot-scale, 0.94) * var(--char-scale, 1) * 0.92));
+  transform: translateX(-50%) translateY(calc(var(--slot-y, 4%) + var(--char-y, 0%) + 6px)) scale(calc(var(--slot-scale, 0.94) * var(--char-scale, 1) * 0.985));
   filter: brightness(0.56) saturate(0.76);
 }
 .gal-cast-slot.is-listening:hover {

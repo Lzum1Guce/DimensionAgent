@@ -36,6 +36,7 @@ class DesktopManager {
     Json install_software(const std::string& bot_id, const Json& request,
                           const std::string& request_id, std::stop_token stop = {});
     Json settings(const std::string &bot_id);
+    Json saved_settings(const std::string &bot_id) const;
     Json set_settings(const std::string &bot_id, const Json &patch);
     // Select the immutable project of a resumed Work run without changing the
     // user's preferred folder for new tasks. A human takeover is never stopped.

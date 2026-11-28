@@ -9,10 +9,10 @@ RequestExecutionLevel user
 SetCompressor /FINAL lzma
 SetCompressorDictSize 16
 Icon "${PAYLOAD}\app\native-release\public\ui\DimensionAgent.ico"
-VIProductVersion "0.7.29.0"
+VIProductVersion "0.7.30.0"
 VIAddVersionKey "ProductName" "DimensionAgent"
 VIAddVersionKey "FileDescription" "DimensionAgent Windows x64 安装程序"
-VIAddVersionKey "FileVersion" "0.7.29"
+VIAddVersionKey "FileVersion" "0.7.30"
 VIAddVersionKey "LegalCopyright" "DimensionAgent contributors"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
@@ -62,7 +62,7 @@ Section "DimensionAgent"
   CreateDirectory "$SMPROGRAMS\DimensionAgent"
   CreateShortcut "$SMPROGRAMS\DimensionAgent\DimensionAgent.lnk" "$INSTDIR\DImensionagent.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\DimensionAgentPublic" "DisplayName" "DimensionAgent"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\DimensionAgentPublic" "DisplayVersion" "0.7.29"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\DimensionAgentPublic" "DisplayVersion" "0.7.30"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\DimensionAgentPublic" "DisplayIcon" "$INSTDIR\DImensionagent.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\DimensionAgentPublic" "UninstallString" '"$INSTDIR\Uninstall.exe"'
 SectionEnd

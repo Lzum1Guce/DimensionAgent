@@ -17,6 +17,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1440,57 +1441,86 @@ std::vector<std::string> probe_antigravity_cli_models(const std::string& binary_
 
     std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
     mutable_cmd.push_back(L'\0');
+    const auto proxy_overrides = build_host_proxy_env_overrides();
+    std::wstring env_block;
+    LPVOID env_ptr = nullptr;
+    DWORD create_flags = CREATE_NO_WINDOW;
+    if (!proxy_overrides.empty()) {
+        env_block = build_environment_block(proxy_overrides);
+        if (!env_block.empty()) {
+            env_ptr = env_block.data();
+            create_flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
+    }
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        create_flags, env_ptr, nullptr, &si, &pi)) {
         return found;
     }
     HandleGuard proc_h(pi.hProcess), thread_h(pi.hThread);
     out_write = HandleGuard{};
 
+    // Do not wait for pipe EOF: a CLI launcher may hand its pipe to another process.
     std::string raw;
-    std::jthread reader([&]() {
-        char buf[2048];
-        DWORD n = 0;
-        while (ReadFile(out_read.h, buf, sizeof(buf), &n, nullptr) && n > 0) {
-            if (raw.size() < 64U * 1024U) raw.append(buf, n);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    for (;;) {
+        const bool done = WaitForSingleObject(proc_h.h, 20) == WAIT_OBJECT_0;
+        DWORD available = 0;
+        if (PeekNamedPipe(out_read.h, nullptr, 0, nullptr, &available, nullptr) && available) {
+            char buf[8192];
+            DWORD n = 0;
+            if (ReadFile(out_read.h, buf, std::min<DWORD>(available, sizeof(buf)), &n, nullptr)) {
+                raw.append(buf, std::min<std::size_t>(n, 65536 - raw.size()));
+            }
+        } else if (done) {
+            break;
         }
-    });
-
-    if (WaitForSingleObject(proc_h.h, 3000) != WAIT_OBJECT_0) {
-        TerminateProcess(proc_h.h, 1);
-        WaitForSingleObject(proc_h.h, 500);
-        if (reader.joinable()) CancelSynchronousIo(static_cast<HANDLE>(reader.native_handle()));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            TerminateProcess(proc_h.h, 1);
+            return found;
+        }
     }
-    if (reader.joinable()) reader.join();
 
     DWORD exit_code = 1;
     GetExitCodeProcess(proc_h.h, &exit_code);
     if (exit_code != 0 || raw.empty()) return found;
 
-    static const std::regex kSlugRe(R"(\b((?:gemini|claude|gpt|o[134]|grok|deepseek|qwen|kimi)[A-Za-z0-9._-]{2,64})\b)",
-                                    std::regex::icase);
-    std::istringstream iss(ensure_valid_utf8(raw));
-    std::string line;
-    while (std::getline(iss, line)) {
-        std::smatch m;
-        auto it = line.cbegin();
-        while (std::regex_search(it, line.cend(), m, kSlugRe)) {
-            push_unique_str(found, m[1].str());
-            it = m.suffix().first;
-            if (found.size() >= 32) break;
-        }
-        if (found.size() >= 32) break;
+    return parse_antigravity_models_output(raw);
+}
+
+// Installation discovery must never wait on the remote subscription catalog.
+std::vector<std::string> cached_antigravity_models(const std::string& binary) {
+    using Clock = std::chrono::steady_clock;
+    struct Snapshot {
+        std::future<std::vector<std::string>> pending;
+        std::vector<std::string> models;
+        Clock::time_point next_probe{};
+    };
+    static std::mutex mutex;
+    static std::map<std::string, Snapshot> snapshots;
+    std::lock_guard lock(mutex);
+    auto& snapshot = snapshots[binary];
+    const auto now = Clock::now();
+    if (snapshot.pending.valid() && snapshot.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        std::vector<std::string> fresh;
+        try { fresh = snapshot.pending.get(); } catch (const std::exception&) {}
+        snapshot.next_probe = now + (fresh.empty() ? std::chrono::seconds(5) : std::chrono::minutes(5));
+        if (!fresh.empty()) snapshot.models = std::move(fresh);
     }
-    return found;
+    if (!snapshot.pending.valid() && now >= snapshot.next_probe) {
+        snapshot.pending = std::async(std::launch::async, probe_antigravity_cli_models, binary);
+    }
+    return snapshot.models;
 }
 
 void probe_antigravity_native(CliHarnessDescriptor& d, const fs::path& agy_cfg_dir, const fs::path& agy_app_dir) {
     std::error_code ec;
     const fs::path settings_p = agy_cfg_dir / L"settings.json";
+    const fs::path oauth_p = agy_cfg_dir / L"antigravity-oauth-token";
     const bool has_settings = fs::is_regular_file(settings_p, ec);
+    const bool has_oauth = fs::is_regular_file(oauth_p, ec);
     const bool has_app_dir = fs::is_directory(agy_app_dir, ec);
-    d.native_configured = d.installed && (has_settings || has_app_dir);
+    d.native_configured = d.installed && (has_oauth || has_settings || has_app_dir);
 
     std::vector<std::string> models;
     if (has_settings) {
@@ -1500,7 +1530,6 @@ void probe_antigravity_native(CliHarnessDescriptor& d, const fs::path& agy_cfg_d
                 const auto dm = trim_copy(jstr(doc, "model"));
                 if (!dm.empty()) {
                     d.native_default_model = dm;
-                    push_unique_str(models, dm);
                 }
                 if (const auto* cm = doc.find("customModelsConfig"); cm && cm->is_object()) {
                     if (const auto* arr = cm->find("models"); arr && arr->is_array()) {
@@ -1518,16 +1547,18 @@ void probe_antigravity_native(CliHarnessDescriptor& d, const fs::path& agy_cfg_d
     }
 
     if (d.installed) {
-        const auto discovered = probe_antigravity_cli_models(d.binary_path);
-        if (!discovered.empty())
-            d.native_model_groups.push_back({"Antigravity CLI 返回的模型", "", discovered});
+        const auto discovered = cached_antigravity_models(d.binary_path);
+        if (!discovered.empty()) {
+            d.native_configured = true;
+            d.native_model_groups.push_back({"Antigravity CLI 可用模型", "", discovered});
+        }
         for (const auto& model : discovered)
             std::erase(models, model);
         if (!models.empty())
             d.native_model_groups.push_back({"本地配置的模型（可用性待验证）", "", std::move(models)});
-        d.native_status_label = d.native_configured
-            ? "已发现本地配置 · 登录状态待验证"
-            : "已安装 · 登录状态待验证";
+        d.native_status_label = (has_oauth || !discovered.empty())
+            ? "已登录 Google Antigravity 原生账号"
+            : (d.native_configured ? "已发现本地配置 · 登录状态待验证" : "已安装 · 请先登录授权");
     } else {
         d.native_status_label = "未安装（PowerShell: irm https://antigravity.google/cli/install.ps1 | iex）";
     }
@@ -1542,84 +1573,76 @@ struct SandboxCliSpec {
     const char* cred_rel_paths[4];  // Relative paths inside /var/lib/dimension-cli-homes/<id>/
 };
 
+constexpr SandboxCliSpec sandbox_cli_specs[] = {
+    {
+        "claude-code", "claude", "npm", "@anthropic-ai/claude-code",
+        "claude",
+        {".claude.json", ".claude/settings.json", ".claude/.credentials.json", nullptr}
+    },
+    {
+        "codex", "codex", "npm", "@openai/codex",
+        "codex login",
+        {".codex/auth.json", ".codex/config.toml", nullptr, nullptr}
+    },
+    {
+        "gemini-cli", "gemini", "npm", "@google/gemini-cli",
+        "gemini",
+        {".gemini/oauth_creds.json", ".gemini/settings.json", ".gemini/google_accounts.json", nullptr}
+    },
+    {
+        "qwen-code", "qwen", "npm", "@qwen-code/qwen-code",
+        "qwen",
+        {".qwen/oauth_creds.json", ".qwen/settings.json", nullptr, nullptr}
+    },
+    {
+        "opencode", "opencode", "npm", "opencode-ai",
+        "opencode auth login",
+        {".local/share/opencode/auth.json", ".config/opencode/opencode.json", nullptr, nullptr}
+    },
+    {
+        "kimi-code", "kimi", "npm", "@moonshot-ai/kimi-code",
+        "kimi login",
+        {".kimi-code/credentials.json", ".kimi-code/config.toml", nullptr, nullptr}
+    },
+    {
+        "deepseek-harness", "dsh", "npm", "@deepseek-ai/dsh",
+        "dsh login",
+        {".dsh/.credentials.yaml", ".dsh/config.yaml", nullptr, nullptr}
+    },
+    {
+        "hermes", "hermes", "hermes_script", "https://hermes-agent.nousresearch.com/install.sh",
+        "hermes setup",
+        {".hermes/auth.json", ".hermes/config.yaml", ".hermes/.env", nullptr}
+    },
+    {
+        "antigravity", "agy", "antigravity_script", "https://antigravity.google/cli/install.sh",
+        "agy",
+        {".gemini/antigravity-cli/antigravity-oauth-token", ".gemini/oauth_creds.json", nullptr, nullptr}
+    },
+};
+
+std::string sandbox_probe_catalog() {
+    A rows;
+    for (const auto& spec : sandbox_cli_specs) {
+        A credentials;
+        for (auto path : spec.cred_rel_paths)
+            if (path) credentials.emplace_back(path);
+        rows.emplace_back(O{{"id", spec.engine_id}, {"bin", spec.bin_name},
+                            {"pkg", std::string_view(spec.install_kind) == "npm" ? spec.package_or_url : ""},
+                            {"creds", std::move(credentials)}});
+    }
+    return Json(std::move(rows)).dump();
+}
+
 const SandboxCliSpec* find_sandbox_cli_spec(std::string_view engine_id) {
-    static const SandboxCliSpec kSpecs[] = {
-        {
-            "claude-code", "claude", "npm", "@anthropic-ai/claude-code",
-            "claude",
-            {".claude.json", ".claude/settings.json", ".claude/.credentials.json", nullptr}
-        },
-        {
-            "codex", "codex", "npm", "@openai/codex",
-            "codex login",
-            {".codex/auth.json", ".codex/config.toml", nullptr, nullptr}
-        },
-        {
-            "gemini-cli", "gemini", "npm", "@google/gemini-cli",
-            "gemini",
-            {".gemini/oauth_creds.json", ".gemini/settings.json", ".gemini/google_accounts.json", nullptr}
-        },
-        {
-            "qwen-code", "qwen", "npm", "@qwen-code/qwen-code",
-            "qwen",
-            {".qwen/oauth_creds.json", ".qwen/settings.json", nullptr, nullptr}
-        },
-        {
-            "opencode", "opencode", "npm", "opencode-ai",
-            "opencode auth login",
-            {".local/share/opencode/auth.json", ".config/opencode/opencode.json", nullptr, nullptr}
-        },
-        {
-            "kimi-code", "kimi", "npm", "@moonshot-ai/kimi-code",
-            "kimi login",
-            {".kimi-code/credentials.json", ".kimi-code/config.toml", nullptr, nullptr}
-        },
-        {
-            "deepseek-harness", "dsh", "npm", "@deepseek-ai/dsh",
-            "dsh login",
-            {".dsh/.credentials.yaml", ".dsh/config.yaml", nullptr, nullptr}
-        },
-        {
-            "hermes", "hermes", "hermes_script", "https://hermes-agent.nousresearch.com/install.sh",
-            "hermes setup",
-            {".hermes/auth.json", ".hermes/config.yaml", ".hermes/.env", nullptr}
-        },
-        {
-            "antigravity", "agy", "antigravity_script", "https://antigravity.google/cli/install.sh",
-            "agy",
-            {".gemini/antigravity-cli/settings.json", ".gemini/antigravity", ".gemini/oauth_creds.json", ".config/antigravity"}
-        },
-    };
-    for (const auto& s : kSpecs) {
+    for (const auto& s : sandbox_cli_specs) {
         if (engine_id == s.engine_id) return &s;
     }
     return nullptr;
 }
 
 std::string strip_wsl_utf16_noise(std::string_view raw) {
-    // wsl.exe emits UTF-16LE diagnostics (e.g. localhost proxy warning) onto stderr.
-    // Convert UTF-16LE cleanly to UTF-8 first so no invalid UTF-8 bytes ever leak into JSON logs!
-    std::string text;
-    if (raw.find('\0') != std::string_view::npos && raw.size() >= 2) {
-        const std::size_t wcount = raw.size() / 2;
-        std::wstring wbuf(wcount, L'\0');
-        std::memcpy(wbuf.data(), raw.data(), wcount * 2);
-        const int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
-                                              nullptr, 0, nullptr, nullptr);
-        if (u8len > 0) {
-            text.resize(static_cast<std::size_t>(u8len));
-            WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
-                                text.data(), u8len, nullptr, nullptr);
-        }
-    } else {
-        text = ensure_valid_utf8(raw);
-    }
-    text = trim_copy(text);
-    if (text.empty()) return {};
-    if (text.find("wsl:") != std::string::npos && text.find("localhost") != std::string::npos) {
-        return {};
-    }
-    return ensure_valid_utf8(text);
+    return sanitize_wsl_stderr_line(raw);
 }
 
 fs::path resolve_wsl_exe_path(const fs::path& provided) {
@@ -1821,6 +1844,9 @@ struct SandboxCliProbeItem {
     std::string binary_path;
     std::string version;
     bool native_configured = false;
+    bool auth_verified = false;
+    std::string native_default_model;
+    std::vector<std::string> native_models;
 };
 
 struct SandboxCliSnapshot {
@@ -1829,7 +1855,8 @@ struct SandboxCliSnapshot {
 };
 
 SandboxCliSnapshot probe_sandbox_cli_snapshot(const fs::path& wsl_executable,
-                                              const std::string& sandbox_distribution) {
+                                              const std::string& sandbox_distribution,
+                                              bool include_models = false) {
     SandboxCliSnapshot snap;
     const fs::path wsl = resolve_wsl_exe_path(wsl_executable);
     snap.env.wsl_available = !wsl.empty();
@@ -1842,7 +1869,9 @@ SandboxCliSnapshot probe_sandbox_cli_snapshot(const fs::path& wsl_executable,
         return snap;
     }
 
-    static const char* kProbeNodeScript = R"NODE(
+    // Pure local offline disk probe ONLY (zero network calls!) so sandbox discovery always returns
+    // in ~200-400ms and can NEVER hang or misreport installed CLIs as missing when proxy/network is off.
+    static const std::string kProbeNodeScript = "const specs = " + sandbox_probe_catalog() + ";\n" + R"NODE(
 const fs = require('fs');
 const cp = require('child_process');
 const existsExec = p => { try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } };
@@ -1877,25 +1906,79 @@ const readAgyVer = () => {
     return m ? m[1] : '';
   } catch { return ''; }
 };
-const specs = [
-  { id: 'antigravity', bin: 'agy', pkg: '', creds: ['.gemini/antigravity-cli/settings.json', '.gemini/antigravity', '.gemini/oauth_creds.json', '.config/antigravity'] },
-  { id: 'claude-code', bin: 'claude', pkg: '@anthropic-ai/claude-code', creds: ['.claude.json', '.claude/settings.json', '.claude/.credentials.json'] },
-  { id: 'codex', bin: 'codex', pkg: '@openai/codex', creds: ['.codex/auth.json', '.codex/config.toml'] },
-  { id: 'gemini-cli', bin: 'gemini', pkg: '@google/gemini-cli', creds: ['.gemini/oauth_creds.json', '.gemini/settings.json', '.gemini/google_accounts.json'] },
-  { id: 'qwen-code', bin: 'qwen', pkg: '@qwen-code/qwen-code', creds: ['.qwen/oauth_creds.json', '.qwen/settings.json'] },
-  { id: 'opencode', bin: 'opencode', pkg: 'opencode-ai', creds: ['.local/share/opencode/auth.json', '.config/opencode/opencode.json'] },
-  { id: 'kimi-code', bin: 'kimi', pkg: '@moonshot-ai/kimi-code', creds: ['.kimi-code/credentials.json', '.kimi-code/config.toml'] },
-  { id: 'deepseek-harness', bin: 'dsh', pkg: '@deepseek-ai/dsh', creds: ['.dsh/.credentials.yaml', '.dsh/config.yaml'] },
-  { id: 'hermes', bin: 'hermes', pkg: '', creds: ['.hermes/auth.json', '.hermes/config.yaml', '.hermes/.env'] }
+const AGY_BUILTIN_MODELS = [
+  'gemini-4-neon-xhigh',
+  'gemini-4-neon-high',
+  'gemini-4-neon-medium',
+  'gemini-4-neon-low',
+  'gemini-4-carbon-high',
+  'gemini-4-carbon-medium',
+  'gemini-4-carbon-low',
+  'gemini-4-argon-high',
+  'gemini-4-argon-medium',
+  'gemini-4-argon-low',
+  'gemini-4-hydrogen-xhigh',
+  'gemini-4-hydrogen-high',
+  'gemini-4-hydrogen-medium',
+  'gemini-4-hydrogen-low',
+  'gemini-pro-orchestrator-neon',
+  'gemini-pro-orchestrator',
+  'gemini-pro-orchestrator-argon',
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'claude-opus-5-5-high',
+  'claude-opus-5-5-medium',
+  'claude-opus-5-5-low',
+  'claude-sonnet-5-5-high',
+  'claude-sonnet-5-5-medium',
+  'claude-sonnet-5-5-low',
+  'gpt-oss-120b-medium'
 ];
+const probeAgyDetails = (home, installed) => {
+  const info = { defaultModel: '', models: [], authVerified: false, cacheStale: true };
+  if (!installed) return info;
+  const cfgDir = home + '/.gemini/antigravity-cli';
+  const hasOauth = existsAny(cfgDir + '/antigravity-oauth-token') || existsAny(home + '/.gemini/oauth_creds.json');
+  info.authVerified = hasOauth;
+  try {
+    const sj = JSON.parse(fs.readFileSync(cfgDir + '/settings.json', 'utf8'));
+    if (sj && typeof sj.model === 'string') info.defaultModel = sj.model.trim();
+  } catch {}
+  const cachePath = cfgDir + '/.dimension-models-cache.json';
+  try {
+    const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    if (cached && Array.isArray(cached.models) && cached.models.length) {
+      info.models = cached.models.map(x => String(x || '').trim()).filter(Boolean).slice(0, 64);
+      const updatedAt = Number(cached.updatedAt || 0);
+      info.cacheStale = !(updatedAt > 0 && (Date.now() - updatedAt) < 5 * 60 * 1000);
+    }
+  } catch {}
+  if (!info.models.length && hasOauth) {
+    info.models = AGY_BUILTIN_MODELS.slice();
+  }
+  return info;
+};
 const items = {};
 for (const s of specs) {
   const binPath = '/opt/dimension-tools/bin/' + s.bin;
   const installed = existsExec(binPath);
   const ver = installed ? (s.id === 'hermes' ? readHermesVer() : (s.id === 'antigravity' ? readAgyVer() : readPkgVer(s.pkg))) : '';
   const home = '/var/lib/dimension-cli-homes/' + s.id;
-  const nativeConfigured = installed && s.creds.some(rel => existsAny(home + '/' + rel));
-  items[s.id] = { installed, binaryPath: installed ? binPath : '', version: ver, nativeConfigured };
+  let nativeConfigured = installed && s.creds.some(rel => existsAny(home + '/' + rel));
+  let nativeDefaultModel = '';
+  let nativeModels = [];
+  let authVerified = nativeConfigured;
+  let cacheStale = false;
+  if (s.id === 'antigravity' && installed) {
+    const agyInfo = probeAgyDetails(home, installed);
+    nativeDefaultModel = agyInfo.defaultModel;
+    nativeModels = agyInfo.models;
+    authVerified = agyInfo.authVerified;
+    cacheStale = agyInfo.cacheStale;
+    nativeConfigured = agyInfo.authVerified || agyInfo.models.length > 0;
+  }
+  items[s.id] = { installed, binaryPath: installed ? binPath : '', version: ver, nativeConfigured, authVerified, nativeDefaultModel, nativeModels, cacheStale };
 }
 const env = {
   bwrapReady: Boolean(which('bwrap')),
@@ -1947,7 +2030,70 @@ process.stdout.write(JSON.stringify({ env, items }));
                 pi.binary_path = jstr(v, "binaryPath");
                 pi.version = jstr(v, "version");
                 pi.native_configured = v.find("nativeConfigured") && v.at("nativeConfigured").is_bool() && v.at("nativeConfigured").as_bool();
+                pi.auth_verified = v.find("authVerified") && v.at("authVerified").is_bool() && v.at("authVerified").as_bool();
+                pi.native_default_model = trim_copy(jstr(v, "nativeDefaultModel"));
+                if (const auto* marr = v.find("nativeModels"); marr && marr->is_array()) {
+                    for (const auto& m : marr->as_array()) {
+                        if (m.is_string()) {
+                            const auto ms = trim_copy(m.as_string());
+                            if (!ms.empty()) push_unique_str(pi.native_models, ms);
+                        }
+                    }
+                }
+                const bool cache_stale = v.find("cacheStale") && v.at("cacheStale").is_bool() && v.at("cacheStale").as_bool();
+                const bool should_bg_refresh = include_models && k == "antigravity" && pi.installed && pi.auth_verified && cache_stale;
                 snap.items[k] = std::move(pi);
+                if (should_bg_refresh) {
+                    static std::atomic<bool> g_agy_refresh_inflight{false};
+                    bool expected = false;
+                    if (g_agy_refresh_inflight.compare_exchange_strong(expected, true)) {
+                        std::thread([wsl_copy = wsl, distro_copy = sandbox_distribution]() {
+                            struct Guard {
+                                std::atomic<bool>& flag;
+                                ~Guard() { flag.store(false, std::memory_order_release); }
+                            } guard{g_agy_refresh_inflight};
+                            try {
+                                std::ostringstream sh;
+                                sh << "HOME=/var/lib/dimension-cli-homes/antigravity "
+                                   << "USER=dimension LOGNAME=dimension LANG=C.UTF-8 LC_ALL=C.UTF-8 ";
+                                for (const auto& [pk, pv] : build_sandbox_proxy_env_overrides()) {
+                                    sh << pk << "='" << pv << "' ";
+                                }
+                                sh << "exec /usr/bin/setpriv --reuid=1001 --regid=1002 --clear-groups "
+                                   << "/usr/bin/timeout --kill-after=1s 6s /opt/dimension-tools/bin/agy models";
+                                const auto mr = run_wsl_streaming_command(
+                                    wsl_copy,
+                                    {L"-d", utf8_to_wide(distro_copy), L"-u", L"root", L"--exec", L"/bin/sh", L"-c",
+                                     utf8_to_wide(sh.str())},
+                                    {},
+                                    9);
+                                if (mr.launched && mr.exit_code == 0) {
+                                    const auto parsed = parse_antigravity_models_output(mr.stdout_text);
+                                    if (!parsed.empty()) {
+                                        Json::Array arr;
+                                        for (const auto& m : parsed) arr.push_back(m);
+                                        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch()).count();
+                                        const std::string payload = Json(Json::Object{
+                                            {"updatedAt", static_cast<double>(now_ms)},
+                                            {"models", std::move(arr)}
+                                        }).dump();
+                                        const std::string write_cmd =
+                                            "mkdir -p /var/lib/dimension-cli-homes/antigravity/.gemini/antigravity-cli && "
+                                            "cat > /var/lib/dimension-cli-homes/antigravity/.gemini/antigravity-cli/.dimension-models-cache.json && "
+                                            "chown 1001:1002 /var/lib/dimension-cli-homes/antigravity/.gemini/antigravity-cli/.dimension-models-cache.json";
+                                        (void)run_wsl_streaming_command(
+                                            wsl_copy,
+                                            {L"-d", utf8_to_wide(distro_copy), L"-u", L"root", L"--exec", L"/bin/sh", L"-c",
+                                             utf8_to_wide(write_cmd)},
+                                            payload,
+                                            5);
+                                    }
+                                }
+                            } catch (...) {}
+                        }).detach();
+                    }
+                }
             }
         }
     } catch (const std::exception& ex) {
@@ -1957,6 +2103,96 @@ process.stdout.write(JSON.stringify({ env, items }));
 }
 
 } // namespace
+
+std::vector<std::string> parse_antigravity_models_output(std::string_view raw) {
+    std::vector<std::string> found;
+    if (raw.empty()) return found;
+    static const std::regex kTokenRe(R"(^[A-Za-z0-9][A-Za-z0-9._-]{2,64}$)");
+    static const std::regex kSlugRe(R"(\b((?:gemini|claude|gpt|o[134]|grok|deepseek|qwen|kimi)[A-Za-z0-9._-]{2,64})\b)",
+                                    std::regex::icase);
+    std::istringstream iss(ensure_valid_utf8(raw));
+    std::string line;
+    while (std::getline(iss, line)) {
+        const std::string trimmed = trim_copy(line);
+        if (trimmed.empty()) continue;
+        // Official `agy models` outputs TSV lines: `<slug>\t<Display Name>`
+        const std::size_t sep = trimmed.find_first_of("\t ");
+        const std::string first = (sep == std::string::npos) ? trimmed : trimmed.substr(0, sep);
+        const std::string first_low = ascii_lower(first);
+        if (first_low != "fetching" && first_low != "error:" && first_low != "warning:" &&
+            std::regex_match(first, kTokenRe) &&
+            (first.find('-') != std::string::npos || std::regex_search(first, kSlugRe))) {
+            push_unique_str(found, first);
+            if (found.size() >= 64) break;
+            continue;
+        }
+        std::smatch m;
+        auto it = trimmed.cbegin();
+        while (std::regex_search(it, trimmed.cend(), m, kSlugRe)) {
+            push_unique_str(found, m[1].str());
+            it = m.suffix().first;
+            if (found.size() >= 64) break;
+        }
+        if (found.size() >= 64) break;
+    }
+    return found;
+}
+
+std::string sanitize_wsl_stderr_line(std::string_view raw) {
+    if (raw.empty()) return {};
+    // When wsl.exe emits a UTF-16LE diagnostic line terminated by \r\0\n\0 and the caller splits
+    // on ASCII '\n', the following UTF-8 line from Linux starts with a stray leading '\0'.
+    // Strip leading lone '\0' when the rest of the line is plain UTF-8 rather than UTF-16LE.
+    std::size_t odd_zeros = 0;
+    std::size_t even_zeros = 0;
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == '\0') {
+            if ((i & 1U) != 0U) ++odd_zeros;
+            else ++even_zeros;
+        }
+    }
+    const std::size_t total_zeros = odd_zeros + even_zeros;
+    std::string_view slice = raw;
+    if (slice.size() >= 2 && slice[0] == '\0' && slice[1] != '\0' && odd_zeros == 0 && even_zeros <= 1) {
+        slice.remove_prefix(1);
+    }
+
+    // Re-evaluate UTF-16LE heuristic on the normalized slice: UTF-16LE ASCII/CJK diagnostics from
+    // wsl.exe contain multiple NUL bytes on odd positions (e.g. "w\0s\0l\0:\0").
+    std::size_t slice_odd_zeros = 0;
+    for (std::size_t i = 1; i < slice.size(); i += 2) {
+        if (slice[i] == '\0') ++slice_odd_zeros;
+    }
+    const bool looks_utf16le = (slice.size() >= 4 && slice_odd_zeros >= 2 &&
+                                (slice_odd_zeros * 4 >= slice.size() || total_zeros >= 4));
+
+    std::string text;
+    if (looks_utf16le) {
+        const std::size_t wcount = slice.size() / 2;
+        std::wstring wbuf(wcount, L'\0');
+        std::memcpy(wbuf.data(), slice.data(), wcount * 2);
+        const int u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
+                                              nullptr, 0, nullptr, nullptr);
+        if (u8len > 0) {
+            text.resize(static_cast<std::size_t>(u8len));
+            WideCharToMultiByte(CP_UTF8, 0, wbuf.data(), static_cast<int>(wbuf.size()),
+                                text.data(), u8len, nullptr, nullptr);
+        }
+    } else {
+        std::string no_nul;
+        no_nul.reserve(slice.size());
+        for (char c : slice) {
+            if (c != '\0') no_nul.push_back(c);
+        }
+        text = ensure_valid_utf8(no_nul);
+    }
+    text = trim_copy(text);
+    if (text.empty()) return {};
+    if (text.find("wsl:") != std::string::npos && text.find("localhost") != std::string::npos) {
+        return {};
+    }
+    return ensure_valid_utf8(text);
+}
 
 std::string windows_path_to_wsl_path(const std::filesystem::path& win_path,
                                      const std::string& sandbox_distribution) {
@@ -2014,6 +2250,8 @@ SandboxCliInstallResult manage_sandbox_cli(const SandboxCliInstallRequest& req,
         return out;
     }
 
+    configure_network_proxy_sandbox(wsl, req.sandbox_distribution);
+
     const std::string action = (req.action == "uninstall" || req.action == "update") ? req.action : "install";
     const std::string registry_url = (req.registry == "official")
         ? "https://registry.npmjs.org"
@@ -2022,8 +2260,11 @@ SandboxCliInstallResult manage_sandbox_cli(const SandboxCliInstallRequest& req,
     std::ostringstream script;
     script << "set -eu\n"
            << "export DEBIAN_FRONTEND=noninteractive\n"
-           << "export NO_COLOR=1\n"
-           << "mkdir -p /opt/dimension-tools/bin /opt/dimension-tools/npm /var/lib/dimension-cli-homes\n"
+           << "export NO_COLOR=1\n";
+    for (const auto& [pk, pv] : build_sandbox_proxy_env_overrides()) {
+        script << "export " << pk << "='" << pv << "'\n";
+    }
+    script << "mkdir -p /opt/dimension-tools/bin /opt/dimension-tools/npm /var/lib/dimension-cli-homes\n"
            << "mkdir -p -m 700 /var/lib/dimension-cli-homes/" << spec->engine_id << "\n"
            << "chown -R 1001:1002 /var/lib/dimension-cli-homes/" << spec->engine_id << "\n";
 
@@ -2404,16 +2645,29 @@ Json launch_sandbox_cli_login_terminal(const std::string& engine_id,
         {},
         10);
 
+    configure_network_proxy_sandbox(wsl, sandbox_distribution);
+    const auto sb_proxy_envs = build_sandbox_proxy_env_overrides();
+    std::string proxy_exports;
+    std::string proxy_notice;
+    for (const auto& [pk, pv] : sb_proxy_envs) {
+        proxy_exports += "export " + pk + "='" + pv + "'; ";
+        if (pk == "HTTPS_PROXY" && !pv.empty()) {
+            proxy_notice = "echo '  已自动连接宿主机代理通道：" + pv + "'; ";
+        }
+    }
+
     // Launch a real visible console running official CLI login strictly inside its isolated home directory.
     // DimensionAgent never reads, intercepts, or proxies any OAuth credential produced by the user.
     const std::string login_banner =
         "echo '============================================================'; "
         "echo '  DimensionAgent 沙盒 CLI 官方账号登录 (" + std::string(spec->engine_id) + ")'; "
         "echo '  凭据仅保存在沙盒专属目录，与宿主机及其他引擎严格隔离。'; "
+        + proxy_notice +
         "echo '  完成登录后直接关闭本窗口，回到设置页点击「刷新状态」即可。'; "
         "echo '============================================================'; "
         "export HOME=/var/lib/dimension-cli-homes/" + engine_id + "; "
         "export PATH=/opt/dimension-tools/bin:/usr/local/bin:/usr/bin:/bin; "
+        + proxy_exports +
         "cd \"$HOME\"; " + std::string(spec->login_shell_cmd) + "; "
         "echo ''; echo '登录进程已结束，按回车键关闭窗口...'; read _dummy";
 
@@ -2481,11 +2735,13 @@ Json launch_host_cli_login_terminal(const std::string& engine_id,
     std::vector<wchar_t> mutable_cmd(cmd_line.begin(), cmd_line.end());
     mutable_cmd.push_back(L'\0');
 
+    std::wstring env_block = build_environment_block(build_host_proxy_env_overrides());
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE,
-                        CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+                        env_block.data(), nullptr, &si, &pi)) {
         throw std::runtime_error("无法打开宿主机登录终端窗口（Win32 错误码 " + std::to_string(GetLastError()) + "）");
     }
     CloseHandle(pi.hThread);
@@ -2869,7 +3125,7 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
     SandboxCliSnapshot sb_snap;
     const bool probe_sandbox = !sandbox_distribution.empty() && !resolve_wsl_exe_path(wsl_executable).empty();
     if (probe_sandbox) {
-        sb_snap = probe_sandbox_cli_snapshot(wsl_executable, sandbox_distribution);
+        sb_snap = probe_sandbox_cli_snapshot(wsl_executable, sandbox_distribution, true);
     }
 
     const std::string policy = (execution_policy == "sandbox_only" || execution_policy == "host_prefer")
@@ -2889,7 +3145,9 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
             d.sandbox_installable = false;
         }
 
+        const SandboxCliProbeItem* sb_item = nullptr;
         if (const auto it = sb_snap.items.find(d.id); it != sb_snap.items.end()) {
+            sb_item = &it->second;
             d.sandbox_installed = it->second.installed;
             d.sandbox_binary_path = it->second.binary_path;
             d.sandbox_version = it->second.version;
@@ -2913,8 +3171,16 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
         if (pick_sandbox) {
             if (d.id == "antigravity") {
                 d.native_default_model.clear();
-                for (auto& group : d.native_model_groups)
-                    group.group_title += "（来自宿主机，沙盒可用性待验证）";
+                if (sb_item && !sb_item->native_default_model.empty()) {
+                    d.native_default_model = sb_item->native_default_model;
+                }
+                if (sb_item && !sb_item->native_models.empty()) {
+                    d.native_model_groups.clear();
+                    d.native_model_groups.push_back({"Antigravity (agy) 沙盒可用模型", "", sb_item->native_models});
+                } else {
+                    for (auto& group : d.native_model_groups)
+                        group.group_title += "（来自宿主机，沙盒可用性待验证）";
+                }
             }
             d.installed = true;
             d.platform = "wsl";
@@ -2922,8 +3188,12 @@ std::vector<CliHarnessDescriptor> discover_cli_harnesses(const std::filesystem::
             d.version = d.sandbox_version;
             d.native_configured = d.sandbox_native_configured;
             d.execution_mode = "sandbox";
+            const bool agy_ready = (d.id == "antigravity") && sb_item &&
+                (sb_item->auth_verified || !sb_item->native_models.empty());
             d.native_status_label = d.id == "antigravity"
-                ? (d.sandbox_native_configured ? "沙盒已装 · 发现配置，登录待验证" : "沙盒已装 · 登录待验证")
+                ? (agy_ready
+                    ? ("沙盒隔离已就绪 · 原生账号已登录" + (d.sandbox_version.empty() ? std::string{} : (" · v" + d.sandbox_version)))
+                    : (d.sandbox_native_configured ? "沙盒已装 · 发现配置，登录待验证" : "沙盒已装 · 请点击沙盒登录授权"))
                 : d.sandbox_native_configured
                 ? ("沙盒隔离已就绪 · 原生账号已登录" + (d.sandbox_version.empty() ? std::string{} : (" · v" + d.sandbox_version)))
                 : ((d.supports_custom_model ? "沙盒隔离已就绪 · 维度 API 即开即用" : "沙盒隔离已就绪 · 点击沙盒登录授权后可用") +
@@ -3764,8 +4034,10 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             }
         }
         if (!req.work_slot_model.reasoning_effort.empty()) {
+            const std::string& raw_eff = req.work_slot_model.reasoning_effort;
+            const std::string hermes_eff = (raw_eff == "xhigh" || raw_eff == "max") ? "high" : raw_eff;
             inv.args.push_back("--reasoning");
-            inv.args.push_back(req.work_slot_model.reasoning_effort);
+            inv.args.push_back(hermes_eff);
         }
         if (inject_work_model) {
             if (host_is_anthropic) {
@@ -3839,7 +4111,8 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             }
         }
 
-        const std::string effort = req.work_slot_model.reasoning_effort;
+        const std::string raw_effort = req.work_slot_model.reasoning_effort;
+        const std::string effort = (raw_effort == "xhigh" || raw_effort == "max") ? "high" : raw_effort;
         const bool valid_effort = (effort == "low" || effort == "medium" || effort == "high");
 
         if (inject_work_model) {
@@ -4099,6 +4372,11 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
                 inv.args.push_back("mcp_servers.cross_harness.args=[\"" + toml_escape_basic(mcp_bridge_u8) + "\"]");
             }
         }
+        const auto& effort = req.work_slot_model.reasoning_effort;
+        if (effort == "low" || effort == "medium" || effort == "high" || effort == "xhigh") {
+            inv.args.push_back("-c");
+            inv.args.push_back("model_reasoning_effort=\"" + effort + "\"");
+        }
         const std::string chosen_m = inject_work_model ? req.work_slot_model.model : req.native_model;
         if (!chosen_m.empty()) {
             inv.args.push_back("-m");
@@ -4132,20 +4410,18 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
         }
         inv.args.push_back(effective_prompt);
     } else if (inv.engine_id == "antigravity") {
-        // Google Antigravity CLI (`agy`): headless `--print --input-format text --output-format stream-json`
-        // Receives arbitrarily long UTF-8 prompts cleanly over stdin (avoids Windows argv length limits).
+        // Google Antigravity CLI (`agy`): headless `--input-format stream-json --output-format stream-json`
+        // Note: `agy --print` expects an inline prompt argument and would consume `--input-format` if placed before it.
+        // Using stream-json on stdin avoids argv length limits, skips `--print` flag collisions, and supports UTF-8 prompts cleanly.
         if (req.read_only_reception) {
             inv.args = {
-                "--print",
-                "--input-format", "text",
+                "--input-format", "stream-json",
                 "--output-format", "stream-json",
-                "--mode", "plan",
                 "--disable-slash-commands"
             };
         } else {
             inv.args = {
-                "--print",
-                "--input-format", "text",
+                "--input-format", "stream-json",
                 "--output-format", "stream-json",
                 "--dangerously-skip-permissions"
             };
@@ -4167,12 +4443,21 @@ PreparedCliInvocation prepare_cli_invocation(const CliHarnessRunRequest& req,
             inv.args.push_back("--model");
             inv.args.push_back(chosen_m);
         }
+        const auto model_encodes_effort = [](std::string_view m) {
+            const std::string low = ascii_lower(m);
+            return low.ends_with("-xhigh") || low.ends_with("-high") ||
+                   low.ends_with("-medium") || low.ends_with("-low") || low.ends_with("-max");
+        };
         const std::string effort = req.work_slot_model.reasoning_effort;
-        if (effort == "low" || effort == "medium" || effort == "high" || effort == "xhigh" || effort == "max") {
+        if (!model_encodes_effort(chosen_m) &&
+            (effort == "low" || effort == "medium" || effort == "high" || effort == "xhigh" || effort == "max")) {
             inv.args.push_back("--effort");
             inv.args.push_back(effort);
         }
-        inv.stdin_payload = effective_prompt;
+        inv.stdin_payload = Json(O{
+            {"event", "user"},
+            {"message", O{{"content", effective_prompt}}}
+        }).dump() + "\n";
     } else {
         // qwen-code / gemini-cli
         if (inject_work_model) {
@@ -5953,30 +6238,52 @@ public:
 
     ~AgyStreamWorker() { stop(); }
 
+    static std::string effective_agy_effort(std::string_view model, std::string_view effort) {
+        const std::string low_m = ascii_lower(model);
+        const bool encodes = low_m.ends_with("-xhigh") || low_m.ends_with("-high") ||
+                             low_m.ends_with("-medium") || low_m.ends_with("-low") || low_m.ends_with("-max");
+        if (encodes) return {};
+        if (effort == "low" || effort == "medium" || effort == "high" || effort == "xhigh" || effort == "max") {
+            return std::string(effort);
+        }
+        return {};
+    }
+
     const std::string& runtime_key() const { return rt_.runtime_key; }
     const std::string& fingerprint() const { return fingerprint_; }
     bool is_alive() const { return alive_.load(std::memory_order_acquire) && proc_.is_running(); }
     std::chrono::steady_clock::time_point last_used() const { return state_.last_used; }
+    bool is_blank_standby() const { return is_alive() && fingerprint_.empty() && state_.sent_keys.empty(); }
+
+    bool matches_model_and_effort(const std::string& model, const std::string& effort) const {
+        return native_model_ == model &&
+               effective_agy_effort(native_model_, reasoning_effort_) == effective_agy_effort(model, effort);
+    }
+
+    void claim_for_session(const std::string& fp) {
+        fingerprint_ = fp;
+        state_.fingerprint = fp;
+        state_.last_used = std::chrono::steady_clock::now();
+    }
 
     bool can_reuse_for(const std::string& fp, const ReceptionTurnInputs& inputs) const {
-        return is_alive() && try_build_incremental_delta_prompt(state_, inputs, fp).has_value();
+        return is_alive() && !fingerprint_.empty() && try_build_incremental_delta_prompt(state_, inputs, fp).has_value();
     }
 
     bool start() {
         std::vector<std::string> args{
             "--input-format", "stream-json",
             "--output-format", "stream-json",
-            "--mode", "plan",
             "--disable-slash-commands"
         };
         if (!native_model_.empty()) {
             args.push_back("--model");
             args.push_back(native_model_);
         }
-        if (reasoning_effort_ == "low" || reasoning_effort_ == "medium" ||
-            reasoning_effort_ == "high" || reasoning_effort_ == "xhigh" || reasoning_effort_ == "max") {
+        const std::string eff = effective_agy_effort(native_model_, reasoning_effort_);
+        if (!eff.empty()) {
             args.push_back("--effort");
-            args.push_back(reasoning_effort_);
+            args.push_back(eff);
         }
         std::wstring cwd_w, env_block;
         bool use_env = false;
@@ -6177,18 +6484,20 @@ private:
         if (!active_turn_) return;
 
         if (ev == "step_update") {
-            const std::string step_type = jstr(doc, "step_type");
-            const std::string think_delta = jstr(doc, "thinking_delta");
+            const auto* su = doc.find("step_update");
+            const Json& holder = (su && su->is_object()) ? *su : doc;
+            const std::string step_type = jstr(holder, "step_type");
+            const std::string think_delta = jstr(holder, "thinking_delta", jstr(holder, "thinking"));
             if (!think_delta.empty() && active_turn_->chunk) {
                 try { active_turn_->chunk("thinking", think_delta); } catch (...) {}
-            } else if (step_type == "thought") {
-                const std::string t = jstr(doc, "text_delta", jstr(doc, "delta"));
+            } else if (step_type == "thought" || step_type == "thinking" || step_type == "reasoning") {
+                const std::string t = jstr(holder, "text_delta", jstr(holder, "delta", jstr(holder, "text")));
                 if (!t.empty() && active_turn_->chunk) {
                     try { active_turn_->chunk("thinking", t); } catch (...) {}
                 }
             }
-            const std::string text_delta = jstr(doc, "text_delta", jstr(doc, "delta"));
-            if (!text_delta.empty() && step_type != "thought") {
+            const std::string text_delta = jstr(holder, "text_delta", jstr(holder, "delta"));
+            if (!text_delta.empty() && step_type != "thought" && step_type != "thinking" && step_type != "reasoning") {
                 active_turn_->raw_text += text_delta;
                 if (active_turn_->chunk) {
                     if (active_turn_->has_tools) {
@@ -6205,21 +6514,26 @@ private:
                 }
             }
         } else if (ev == "result") {
-            const std::string status = ascii_lower(jstr(doc, "status"));
-            active_turn_->result_response = jstr(doc, "response");
-            if (const auto* u = doc.find("usage"); u && u->is_object()) {
+            const auto* res = doc.find("result");
+            const Json& holder = (res && res->is_object()) ? *res : doc;
+            const std::string status = ascii_lower(jstr(holder, "status"));
+            const std::string err_msg = jstr(holder, "error");
+            active_turn_->result_response = jstr(holder, "response", jstr(holder, "text"));
+            if (const auto* u = holder.find("usage"); u && u->is_object()) {
                 active_turn_->input_tokens = static_cast<std::int64_t>(jnum(*u, "input_tokens", 0));
                 active_turn_->output_tokens = static_cast<std::int64_t>(jnum(*u, "output_tokens", 0));
             }
-            if (!status.empty() && status != "success" && status != "ok") {
+            if ((!status.empty() && status != "success" && status != "ok") || !err_msg.empty()) {
                 active_turn_->is_error = true;
-                active_turn_->error_detail = jstr(doc, "error", active_turn_->result_response);
+                active_turn_->error_detail = !err_msg.empty() ? err_msg : active_turn_->result_response;
             }
             active_turn_->finished = true;
             turn_cv_.notify_all();
         } else if (ev == "error") {
+            const auto* err_obj = doc.find("error");
+            const Json& holder = (err_obj && err_obj->is_object()) ? *err_obj : doc;
             active_turn_->is_error = true;
-            active_turn_->error_detail = jstr(doc, "message", jstr(doc, "error"));
+            active_turn_->error_detail = jstr(holder, "message", jstr(doc, "error"));
             active_turn_->finished = true;
             turn_cv_.notify_all();
         }
@@ -6253,15 +6567,17 @@ public:
                  const fs::path& app_root,
                  const fs::path& wsl_executable,
                  const std::string& sandbox_distribution,
-                 const std::string& execution_policy) {
-        if (engine_id != "kimi-code") return;
+                 const std::string& execution_policy,
+                 const std::string& native_model = {},
+                 const std::string& reasoning_effort = {}) {
+        if (engine_id != "kimi-code" && engine_id != "antigravity") return;
         std::lock_guard lk(mu_);
         if (shutting_down_) return;
         if (prewarm_running_) return;
         if (prewarm_thread_.joinable()) prewarm_thread_.join();
         prewarm_running_ = true;
         prewarm_thread_ = std::thread([this, engine_id, data_root, app_root, wsl_executable,
-                                       sandbox_distribution, execution_policy]() {
+                                       sandbox_distribution, execution_policy, native_model, reasoning_effort]() {
             struct DoneGuard {
                 CliReceptionPool* self;
                 ~DoneGuard() {
@@ -6273,27 +6589,83 @@ public:
                 auto rt = resolve_runtime(engine_id, data_root, app_root, wsl_executable,
                                           sandbox_distribution, execution_policy);
                 if (!rt) return;
+
+                if (engine_id == "kimi-code") {
+                    {
+                        std::lock_guard lk2(mu_);
+                        if (shutting_down_) return;
+                        for (const auto& slot : kimi_slots_) {
+                            if (slot.worker && slot.worker->runtime_key() == rt->runtime_key && slot.worker->is_alive()) {
+                                return; // Already warm!
+                            }
+                        }
+                    }
+                    auto worker = std::make_shared<KimiAcpWorker>(*rt);
+                    if (!worker->start()) return;
+                    std::lock_guard lk2(mu_);
+                    if (shutting_down_) {
+                        worker->stop();
+                        return;
+                    }
+                    if (kimi_slots_.size() < 2U) {
+                        kimi_slots_.push_back(KimiSlot{std::move(worker), false});
+                    } else {
+                        worker->stop();
+                    }
+                    return;
+                }
+
+                // Antigravity (`agy`) blank standby warmup: completes ~5s silent auth + loadCodeAssist + init in background
+                // with zero LLM tokens consumed so the user's first message launches immediately (~28ms).
+                std::vector<std::shared_ptr<AgyStreamWorker>> replaced_standbys;
                 {
                     std::lock_guard lk2(mu_);
                     if (shutting_down_) return;
-                    for (const auto& slot : kimi_slots_) {
-                        if (slot.worker && slot.worker->runtime_key() == rt->runtime_key && slot.worker->is_alive()) {
-                            return; // Already warm!
+                    for (const auto& slot : agy_slots_) {
+                        if (!slot.busy && slot.worker && slot.worker->runtime_key() == rt->runtime_key &&
+                            slot.worker->is_blank_standby() &&
+                            slot.worker->matches_model_and_effort(native_model, reasoning_effort)) {
+                            return; // Matching warm standby already ready!
                         }
                     }
                 }
-                auto worker = std::make_shared<KimiAcpWorker>(*rt);
+                auto worker = std::make_shared<AgyStreamWorker>(*rt, std::string{}, native_model, reasoning_effort);
                 if (!worker->start()) return;
-                std::lock_guard lk2(mu_);
-                if (shutting_down_) {
-                    worker->stop();
-                    return;
+                {
+                    std::lock_guard lk2(mu_);
+                    if (shutting_down_) {
+                        worker->stop();
+                        return;
+                    }
+                    // Replace any stale blank standby targeting a different model so we keep at most 1 standby slot.
+                    for (auto it = agy_slots_.begin(); it != agy_slots_.end();) {
+                        if (!it->busy && it->worker && it->worker->is_blank_standby()) {
+                            replaced_standbys.push_back(std::move(it->worker));
+                            it = agy_slots_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    if (agy_slots_.size() >= 4U) {
+                        auto oldest = agy_slots_.end();
+                        for (auto it = agy_slots_.begin(); it != agy_slots_.end(); ++it) {
+                            if (!it->busy && (oldest == agy_slots_.end() ||
+                                              it->worker->last_used() < oldest->worker->last_used())) {
+                                oldest = it;
+                            }
+                        }
+                        if (oldest != agy_slots_.end()) {
+                            replaced_standbys.push_back(std::move(oldest->worker));
+                            agy_slots_.erase(oldest);
+                        }
+                    }
+                    if (agy_slots_.size() < 4U) {
+                        agy_slots_.push_back(AgySlot{std::move(worker), false});
+                    } else {
+                        replaced_standbys.push_back(std::move(worker));
+                    }
                 }
-                if (kimi_slots_.size() < 2U) {
-                    kimi_slots_.push_back(KimiSlot{std::move(worker), false});
-                } else {
-                    worker->stop();
-                }
+                for (auto& old_w : replaced_standbys) old_w->stop();
             } catch (...) {}
         });
     }
@@ -6549,12 +6921,26 @@ private:
                 if (shutting_down_) return {};
                 evict_idle_locked(dead_kimi, dead_agy);
 
+                // Priority 1: reuse warm session worker with matching fingerprint + incremental history
                 for (auto& s : agy_slots_) {
                     if (!s.busy && s.worker && s.worker->runtime_key() == rt.runtime_key &&
                         s.worker->can_reuse_for(fingerprint, inputs)) {
                         s.busy = true;
                         worker = s.worker;
                         break;
+                    }
+                }
+                // Priority 2: claim a prewarmed blank standby worker matching model & effort (saves 5-14s cold auth!)
+                if (!worker) {
+                    for (auto& s : agy_slots_) {
+                        if (!s.busy && s.worker && s.worker->runtime_key() == rt.runtime_key &&
+                            s.worker->is_blank_standby() &&
+                            s.worker->matches_model_and_effort(config.cli_native_model, config.reasoning_effort)) {
+                            s.busy = true;
+                            s.worker->claim_for_session(fingerprint);
+                            worker = s.worker;
+                            break;
+                        }
                     }
                 }
             }
@@ -6643,9 +7029,12 @@ void prewarm_cli_reception_engine(const std::string& engine_id,
                                   const std::filesystem::path& app_root,
                                   const std::filesystem::path& wsl_executable,
                                   const std::string& sandbox_distribution,
-                                  const std::string& execution_policy) {
+                                  const std::string& execution_policy,
+                                  const std::string& native_model,
+                                  const std::string& reasoning_effort) {
     CliReceptionPool::instance().prewarm(engine_id, data_root, app_root, wsl_executable,
-                                         sandbox_distribution, execution_policy);
+                                         sandbox_distribution, execution_policy,
+                                         native_model, reasoning_effort);
 }
 
 void shutdown_cli_reception_pool() {

@@ -351,6 +351,7 @@ Json CanvasNode::to_json() const {
         {"compressMode", compress_mode},
         {"maxOutputChars", static_cast<double>(max_output_chars)},
         {"gateMode", gate_mode},
+        {"requirePass", require_pass},
         {"passKeyword", pass_keyword},
         {"failKeyword", fail_keyword},
         {"maxIterations", static_cast<double>(max_iterations)},
@@ -414,6 +415,7 @@ CanvasNode CanvasNode::from_json(const Json& j) {
     }
     n.pass_keyword = jstr(j, "passKeyword", "PASS");
     n.fail_keyword = jstr(j, "failKeyword", "FAIL");
+    n.require_pass = jbool(j, "requirePass", false);
     n.max_iterations = std::clamp(jint(j, "maxIterations", 3), 1, 20);
     n.approval_hint = jstr(j, "approvalHint");
     n.bool_source = jstr(j, "boolSource", "auto") == "fixed" ? "fixed" : "auto";
@@ -535,6 +537,12 @@ CanvasValidationResult validate_canvas_graph(const CanvasGraph& graph,
     }
     std::set<std::string> node_ids;
     for (const auto& n : graph.nodes) {
+        if (n.type == "gate" && n.gate_mode == "auto_condition" && n.require_pass &&
+            trim_copy(n.pass_keyword).empty()) {
+            res.ok = false;
+            res.error = "最终验收需要填写通过关键词";
+            return res;
+        }
         if (n.id.empty() || !node_ids.insert(n.id).second) {
             res.ok = false;
             res.error = "节点 ID 为空或重复：" + n.id;
@@ -691,14 +699,35 @@ std::string assemble_canvas_node_context(const CanvasGraph& graph,
     std::string user_prompt = self ? self->prompt : std::string{};
     const bool prompt_used_prev = (user_prompt.find("{{prev}}") != std::string::npos);
     const bool prompt_used_input = (user_prompt.find("{{input}}") != std::string::npos);
-    replace_all(user_prompt, "{{input}}", flow_input);
-    replace_all(user_prompt, "{{prev}}", prev_block);
-    replace_all(user_prompt, "{{feedback}}", feedback_note);
-    for (const auto& [nid, out_txt] : node_outputs) {
-        replace_all(user_prompt, "{{node:" + nid + "}}", out_txt);
-        if (const auto* np = find_node(graph, nid); np && !np->title.empty()) {
-            replace_all(user_prompt, "{{title:" + np->title + "}}", out_txt);
+    // Expand only placeholders authored in the template. User text and member
+    // deliveries can legitimately contain literal placeholders of their own.
+    if (user_prompt.find("{{") != std::string::npos) {
+        std::map<std::string, const std::string*> values{
+            {"input", &flow_input}, {"prev", &prev_block}, {"feedback", &feedback_note}};
+        for (const auto& [id, output] : node_outputs) {
+            values.emplace("node:" + id, &output);
+            if (const auto* n = find_node(graph, id); n && !n->title.empty())
+                values.emplace("title:" + n->title, &output);
         }
+        std::string rendered;
+        std::size_t offset = 0;
+        while (offset < user_prompt.size()) {
+            const auto start = user_prompt.find("{{", offset);
+            if (start == std::string::npos) break;
+            rendered.append(user_prompt, offset, start - offset);
+            const auto end = user_prompt.find("}}", start + 2);
+            if (end == std::string::npos) { offset = start; break; }
+            const auto found = values.find(user_prompt.substr(start + 2, end - start - 2));
+            if (found == values.end()) {
+                rendered += "{{";
+                offset = start + 2;
+            } else {
+                rendered += *found->second;
+                offset = end + 2;
+            }
+        }
+        rendered.append(user_prompt, offset);
+        user_prompt = std::move(rendered);
     }
 
     if (self && self->context_mode == "template_only") {
@@ -739,9 +768,17 @@ std::string assemble_canvas_node_context(const CanvasGraph& graph,
         // Attach compact index of earlier non-direct completed nodes in this graph
         std::set<std::string> direct_set;
         for (const auto& d : collect_forward_dependencies(graph, target_node_id)) direct_set.insert(d);
+        auto ancestors = direct_set;
+        std::vector<std::string> pending(direct_set.begin(), direct_set.end());
+        while (!pending.empty()) {
+            const auto id = std::move(pending.back());
+            pending.pop_back();
+            for (const auto& upstream : collect_forward_dependencies(graph, id))
+                if (ancestors.insert(upstream).second) pending.push_back(upstream);
+        }
         std::ostringstream anc;
         for (const auto& n : graph.nodes) {
-            if (n.id == target_node_id || direct_set.contains(n.id)) continue;
+            if (!ancestors.contains(n.id) || direct_set.contains(n.id)) continue;
             if (const auto it = node_outputs.find(n.id); it != node_outputs.end() && !it->second.empty()) {
                 std::string snippet = it->second;
                 if (snippet.size() > 1200) snippet = canvas_text_prefix(snippet, 1200) + "…（已按链路预算截断）";
@@ -794,7 +831,7 @@ CanvasCollapseResult collapse_nodes_to_blueprint_function(const CanvasGraph& can
         min_x = std::min(min_x, n.x);
         min_y = std::min(min_y, n.y);
     }
-    if (inner_nodes.empty()) throw std::runtime_error("未找到有效的已选节点");
+    if (inner_nodes.size() != sel.size()) throw std::runtime_error("部分选中步骤已失效，请刷新蓝图后重新选择");
 
     static std::atomic<std::uint64_t> g_collapse_seq{0};
     const std::string stamp = std::to_string(now_epoch_ms()) + "-" + std::to_string(++g_collapse_seq);
@@ -1495,16 +1532,30 @@ void CanvasRuntimeService::load_recent_runs_locked() {
             r->gate_reviews = static_cast<int>(jnum(doc,"gateReviews",-1));
             r->gate_rejections = static_cast<int>(jnum(doc,"gateRejections",-1));
             r->status = jstr(doc, "status", "cancelled");
-            // Any previously in-flight run after a restart is marked interrupted cleanly
-            if (r->status == "running" || r->status == "waiting_approval") {
-                r->status = "cancelled";
-                r->error = "服务重启，上次未完成的蓝图流程已安全中止";
-            }
-            r->error = jstr(doc, "error", r->error);
+            const bool interrupted = r->status == "running" || r->status == "waiting_approval";
+            r->error = jstr(doc, "error");
+            auto strings = [](const Json& object, const char* key) {
+                std::vector<std::string> result;
+                if (const auto* items = object.find(key); items && items->is_array())
+                    for (const auto& value : items->as_array())
+                        if (value.is_string()) result.push_back(value.as_string());
+                return result;
+            };
+            r->event_logs = strings(doc, "logs");
+            r->final_artifacts = strings(doc, "finalArtifacts");
+            if (const auto* loops = doc.find("loopCounts"); loops && loops->is_object())
+                for (const auto& [key, count] : loops->as_object())
+                    if (count.is_number()) r->loop_counts[key] = jint(*loops, key);
             r->final_output = jstr(doc, "finalOutput");
             r->created_at = static_cast<std::int64_t>(jnum(doc, "createdAt"));
             r->updated_at = static_cast<std::int64_t>(jnum(doc, "updatedAt"));
             r->finished_at = static_cast<std::int64_t>(jnum(doc, "finishedAt"));
+            if (interrupted) {
+                r->status = "cancelled";
+                r->error = "服务重启，上次未完成的蓝图流程已中止；请确认后重试";
+                r->finished_at = r->updated_at = now_epoch_ms();
+                r->append_log_locked(r->error);
+            }
             if (const auto* nd = doc.find("nodes"); nd && nd->is_object()) {
                 for (const auto& [k, nv] : nd->as_object()) {
                     if (!nv.is_object()) continue;
@@ -1515,6 +1566,17 @@ void CanvasRuntimeService::load_recent_runs_locked() {
                     ns.title = jstr(nv, "title");
                     ns.type = jstr(nv, "type");
                     ns.status = jstr(nv, "status", "pending");
+                    ns.progress_note = jstr(nv, "progressNote");
+                    ns.gate_decision = jstr(nv, "gateDecision");
+                    ns.approval_hint = jstr(nv, "approvalHint");
+                    ns.artifacts = strings(nv, "artifacts");
+                    ns.started_at = static_cast<std::int64_t>(jnum(nv, "startedAt"));
+                    ns.finished_at = static_cast<std::int64_t>(jnum(nv, "finishedAt"));
+                    if (interrupted && (ns.status == "running" || ns.status == "waiting_approval")) {
+                        ns.status = "cancelled";
+                        ns.progress_note = r->error;
+                        ns.finished_at = r->finished_at;
+                    }
                     ns.output = jstr(nv, "output");
                     ns.error = jstr(nv, "error");
                     ns.model_label = jstr(nv, "modelLabel");
@@ -1526,6 +1588,7 @@ void CanvasRuntimeService::load_recent_runs_locked() {
             }
             r->request_id = jstr(doc, "requestId");
             if (!r->request_id.empty()) request_runs_[r->request_id] = r->run_id;
+            if (interrupted) { in.close(); persist_run(*r); }
             runs_[r->run_id] = std::move(r);
         } catch (...) {}
     }
@@ -2146,28 +2209,40 @@ bool CanvasRuntimeService::execute_graph_frame(const std::shared_ptr<RunRecord>&
                         wr.output = std::string(passed ? "TRUE" : "FALSE") + "\n" + detail.str() +
                                     (combined_up.empty() ? "" : ("\n\n" + combined_up));
                     } else if (node.gate_mode == "auto_condition") {
-                        // Evaluate condition against direct upstream outputs
-                        std::string combined_up;
-                        for (const auto& d : collect_forward_dependencies(graph, node.id)) {
-                            if (const auto it = snap_outputs.find(d); it != snap_outputs.end()) {
-                                combined_up += "\n" + it->second;
+                        const auto deps = collect_forward_dependencies(graph, node.id);
+                        const auto pass_word = ascii_lower(trim_copy(node.pass_keyword));
+                        std::string combined_up, missing_verdict;
+                        for (const auto& id : deps) {
+                            const auto found = snap_outputs.find(id);
+                            if (found != snap_outputs.end()) combined_up += "\n" + found->second;
+                            if (!node.require_pass) continue;
+                            const auto text = found == snap_outputs.end() ? std::string{} : trim_copy(found->second);
+                            const auto last = text.find_last_of("\r\n");
+                            const auto verdict = trim_copy(text.substr(last == std::string::npos ? 0 : last + 1));
+                            if (ascii_lower(verdict) != pass_word) {
+                                if (!missing_verdict.empty()) missing_verdict += "、";
+                                const auto* upstream = find_node(graph, id);
+                                missing_verdict += upstream && !upstream->title.empty() ? upstream->title : id;
                             }
                         }
-                        const std::string low_up = ascii_lower(combined_up);
-                        const std::string low_pass = ascii_lower(trim_copy(node.pass_keyword));
-                        const std::string low_fail = ascii_lower(trim_copy(node.fail_keyword));
-                        const bool hit_fail = !low_fail.empty() && low_up.find(low_fail) != std::string::npos;
-                        const bool hit_pass = !low_pass.empty() && low_up.find(low_pass) != std::string::npos;
-
-                        bool passed = hit_pass && !hit_fail;
-                        if (low_pass.empty() && !low_fail.empty()) passed = !hit_fail;
-
+                        bool passed;
+                        if (node.require_pass) {
+                            passed = !deps.empty() && !pass_word.empty() && missing_verdict.empty();
+                            wr.gate_comment = passed ? "所有直接上游均已通过验收" : deps.empty()
+                                ? "最终验收缺少上游结论"
+                                : missing_verdict + "：末行需要明确写出 " + node.pass_keyword;
+                        } else {
+                            const auto text = ascii_lower(combined_up);
+                            const auto fail_word = ascii_lower(trim_copy(node.fail_keyword));
+                            const bool hit_fail = !fail_word.empty() && text.find(fail_word) != std::string::npos;
+                            passed = !hit_fail && (pass_word.empty() ? !fail_word.empty() : text.find(pass_word) != std::string::npos);
+                            wr.gate_comment = passed
+                                ? ("条件命中通过（关键词：" + node.pass_keyword + "）")
+                                : ("审校未通过，触发闭环返工：\n" + trim_copy(combined_up));
+                        }
                         wr.ok = true;
-                        wr.model_label = "自动条件门";
+                        wr.model_label = node.require_pass ? "最终验收" : "自动条件门";
                         wr.gate_decision = passed ? "pass" : "loop";
-                        wr.gate_comment = passed
-                            ? ("条件命中通过（关键词：" + node.pass_keyword + "）")
-                            : ("审校未通过，触发闭环返工：\n" + trim_copy(combined_up));
                         wr.output = upstream_ctx;
                     } else {
                         // Human approval gate: pause cleanly and wait on condition_variable!
@@ -2340,19 +2415,23 @@ bool CanvasRuntimeService::execute_graph_frame(const std::shared_ptr<RunRecord>&
                             looped = true;
                         }
                     }
-                    if (looped || has_else_branch || is_logic) {
+                    const bool final_gate = wr.node.gate_mode == "auto_condition" && wr.node.require_pass;
+                    if (looped || (!final_gate && (has_else_branch || is_logic))) {
                         local_gate_outcome[wr.node.id] = "loop";
                         if (is_logic && !looped) {
                             std::lock_guard lk(rec->mu);
                             rec->nodes[nkey].progress_note = has_else_branch ? "判定为假 ✗（走不满足分支）" : "判定为假 ✗";
                         }
-                    } else if (wr.node.gate_mode != "auto_condition") {
+                    } else if (final_gate || wr.node.gate_mode != "auto_condition") {
                         any_failed = true;
                         local_status[wr.node.id] = "failed";
                         std::lock_guard lk(rec->mu);
                         auto& ns = rec->nodes[nkey];
                         ns.status = "failed";
-                        ns.error = fb_edges.empty() ? "人工审批已驳回，没有返工连线" : "人工审批已驳回，已达到返工轮次上限";
+                        if (final_gate) {
+                            ns.error = "最终验收未通过：" + wr.gate_comment +
+                                (real_loops.empty() ? "（无返工回路）" : "（返工次数已用完）");
+                        } else ns.error = fb_edges.empty() ? "人工审批已驳回，没有返工连线" : "人工审批已驳回，已达到返工轮次上限";
                         ns.progress_note = ns.error;
                         rec->error = ns.error;
                         rec->append_log_locked(ns.error);

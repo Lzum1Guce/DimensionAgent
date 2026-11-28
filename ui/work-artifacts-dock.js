@@ -955,7 +955,7 @@ export function createWorkArtifactsDock({
         if (error.status !== 404) throw error;
       }
     }
-    throw new Error(`历史版本 v${cp.versionNumber} 中尚未生成该文件`);
+    throw new Error(`历史版本 v${cp.version} 中尚未生成该文件`);
   }
 
   // =========================================================================
@@ -1117,9 +1117,9 @@ export function createWorkArtifactsDock({
         const cpMini = el('div', 'work-tri-cp-bar');
         cpMini.append(el('span', 'work-tri-cp-label', '时光机'));
         for (const cp of checkpoints) {
-          const b = el('button', 'work-cp-pill', `v${cp.versionNumber}`);
+          const b = el('button', 'work-cp-pill', `v${cp.version}`);
           b.type = 'button';
-          b.title = `预览或回退至 v${cp.versionNumber} · ${cp.label || ''}`;
+          b.title = `预览或回退至 v${cp.version} · ${cp.label || ''}`;
           b.onclick = () => {
             activeCheckpointId = cp.id;
             viewMode = 'preview';
@@ -1496,7 +1496,7 @@ export function createWorkArtifactsDock({
       activeCheckpointId === renderCp && manualRefreshTick === renderTick;
     const activeCp = activeCheckpointId ? checkpoints.find(c => c.id === activeCheckpointId) : null;
     if (activeCp) {
-      const loading = el('div', 'work-dock-empty', `正在加载时光机快照 v${activeCp.versionNumber}…`);
+      const loading = el('div', 'work-dock-empty', `正在加载时光机快照 v${activeCp.version}…`);
       stage.append(loading);
       try {
         const snap = await loadCheckpointSource(activeCp, file);
@@ -1507,7 +1507,7 @@ export function createWorkArtifactsDock({
           const frameWrap = el('div', `work-dock-canvas-shell${viewportMode === 'mobile' ? ' is-mobile' : ''}`);
           const frame = document.createElement('iframe');
           frame.className = 'work-dock-iframe';
-          frame.title = `v${activeCp.versionNumber} · ${snap.path}`;
+          frame.title = `v${activeCp.version} · ${snap.path}`;
           frame.setAttribute('sandbox', 'allow-scripts');
           frame.srcdoc = SVG_EXTS.has(snapExt) ? wrapSvgAsHtmlDoc(snap.content) : injectOpaqueStorageShim(snap.content);
           frameWrap.append(frame);
@@ -1607,9 +1607,9 @@ export function createWorkArtifactsDock({
 
     for (const cp of checkpoints) {
       const active = activeCheckpointId === cp.id;
-      const btn = el('button', `work-cp-pill${active ? ' is-active' : ''}`, `v${cp.versionNumber}`);
+      const btn = el('button', `work-cp-pill${active ? ' is-active' : ''}`, `v${cp.version}`);
       btn.type = 'button';
-      btn.title = `v${cp.versionNumber} · ${cp.label || '历史快照'}（点击对比画面）`;
+      btn.title = `v${cp.version} · ${cp.label || '历史快照'}（点击对比画面）`;
       btn.onclick = () => {
         activeCheckpointId = active ? '' : cp.id;
         renderArtifactsPane();
@@ -1631,13 +1631,13 @@ export function createWorkArtifactsDock({
     if (activeCheckpointId) {
       const curCp = checkpoints.find(c => c.id === activeCheckpointId);
       if (curCp && currentRunId && api) {
-        const restoreBtn = el('button', 'work-cp-restore-btn', `↺ 回退至 v${curCp.versionNumber}`);
+        const restoreBtn = el('button', 'work-cp-restore-btn', `↺ 回退至 v${curCp.version}`);
         restoreBtn.type = 'button';
         restoreBtn.title = '将工作台代码一键恢复到此轮状态（回退前会自动生成防手滑备份）';
         restoreBtn.onclick = async () => {
           const ok = await confirmDangerAction({
-            title: `回退至 v${curCp.versionNumber}`,
-            message: `将把工作台代码整体恢复到 v${curCp.versionNumber}${curCp.label ? `（${curCp.label}）` : ''} 的状态，此后的所有改动都会被覆盖。回退前会自动生成一份备份，必要时可从备份找回。`,
+            title: `回退至 v${curCp.version}`,
+            message: `将把工作台代码整体恢复到 v${curCp.version}${curCp.label ? `（${curCp.label}）` : ''} 的状态，此后的所有改动都会被覆盖。回退前会自动生成一份备份，必要时可从备份找回。`,
             confirmLabel: '确认回退',
           });
           if (!ok) return;
@@ -1651,13 +1651,13 @@ export function createWorkArtifactsDock({
             activeCheckpointId = '';
             manualRefreshTick++;
             sourceCache.clear();
-            messageActionNotice(`已将工作台回退至 v${curCp.versionNumber}（回退前状态已自动备份）`);
+            messageActionNotice(`已将工作台回退至 v${curCp.version}（回退前状态已自动备份）`);
             onCheckpointRestored?.(currentRunId);
             renderArtifactsPane();
           } catch (err) {
             messageActionNotice(err?.message || '回退检查点失败');
             restoreBtn.disabled = false;
-            restoreBtn.textContent = `↺ 回退至 v${curCp.versionNumber}`;
+            restoreBtn.textContent = `↺ 回退至 v${curCp.version}`;
           }
         };
         checkpointStrip.append(restoreBtn);

@@ -25,8 +25,8 @@ void check(bool ok, const char* msg) {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    fs::path test_root = argc > 1 ? fs::path(argv[1]) : (fs::temp_directory_path() / "dim_work_cli_broker_test");
+int wmain(int argc, wchar_t** argv) {
+    fs::path test_root = argc > 1 ? fs::absolute(fs::path(argv[1])) : (fs::temp_directory_path() / "dim_work_cli_broker_test");
     std::error_code ec;
     fs::remove_all(test_root, ec);
     fs::create_directories(test_root, ec);
@@ -510,32 +510,55 @@ int main(int argc, char** argv) {
             fs::remove(inv.temp_query_file, ec);
         }
 
-        // 5g. Antigravity CLI (`agy`): read-only reception vs full worker execution
+        // 5g. Antigravity CLI (`agy`): read-only reception vs full worker execution (stream-json NDJSON stdin)
         {
             auto req = ro_base;
             req.engine_id = "antigravity";
-            req.native_model = "gemini-3.8-flash-high";
-            req.work_slot_model.reasoning_effort = "high";
+            req.native_model = "gemini-4-neon-xhigh";
+            req.work_slot_model.reasoning_effort = "low"; // must NOT conflict with explicit -xhigh model suffix
             const auto ro_inv = prepare_cli_invocation(req, ro_harnesses);
-            check(has_arg(ro_inv.args, "--print") &&
+            check(!has_arg(ro_inv.args, "--print") &&
+                      has_pair(ro_inv.args, "--input-format", "stream-json") &&
                       has_pair(ro_inv.args, "--output-format", "stream-json") &&
-                      has_pair(ro_inv.args, "--mode", "plan") &&
                       has_arg(ro_inv.args, "--disable-slash-commands") &&
                       !has_arg(ro_inv.args, "--dangerously-skip-permissions") &&
-                      has_pair(ro_inv.args, "--model", "gemini-3.8-flash-high") &&
-                      has_pair(ro_inv.args, "--effort", "high") &&
+                      has_pair(ro_inv.args, "--model", "gemini-4-neon-xhigh") &&
+                      !has_arg(ro_inv.args, "--effort") &&
+                      ro_inv.stdin_payload.find("\"event\":\"user\"") != std::string::npos &&
                       ro_inv.stdin_payload.find("请帮我评估这个需求需要哪些步骤") != std::string::npos,
-                  "Antigravity CLI read_only_reception uses --mode plan --disable-slash-commands and stdin payload");
+                  "Antigravity CLI omits conflicting --effort when --model already encodes tier suffix (gemini-4-neon-xhigh)");
             fs::remove(ro_inv.temp_query_file, ec);
+
+            auto eff_req = ro_base;
+            eff_req.engine_id = "antigravity";
+            eff_req.native_model = "gemini-4-neon";
+            eff_req.work_slot_model.reasoning_effort = "xhigh";
+            const auto eff_inv = prepare_cli_invocation(eff_req, ro_harnesses);
+            check(has_pair(eff_inv.args, "--model", "gemini-4-neon") &&
+                      has_pair(eff_inv.args, "--effort", "xhigh"),
+                  "Antigravity CLI forwards --effort xhigh when --model has no tier suffix");
+            fs::remove(eff_inv.temp_query_file, ec);
 
             req.read_only_reception = false;
             const auto exec_inv = prepare_cli_invocation(req, ro_harnesses);
-            check(has_arg(exec_inv.args, "--dangerously-skip-permissions") &&
-                      !has_pair(exec_inv.args, "--mode", "plan") &&
+            check(!has_arg(exec_inv.args, "--print") &&
+                      has_pair(exec_inv.args, "--input-format", "stream-json") &&
+                      has_pair(exec_inv.args, "--output-format", "stream-json") &&
+                      has_arg(exec_inv.args, "--dangerously-skip-permissions") &&
                       !exec_inv.session_id_map_file.empty() &&
+                      exec_inv.stdin_payload.find("\"event\":\"user\"") != std::string::npos &&
                       exec_inv.stdin_payload.find("请帮我评估这个需求需要哪些步骤") != std::string::npos,
-                  "Antigravity CLI worker mode enables --dangerously-skip-permissions and session map");
+                  "Antigravity CLI worker mode enables --dangerously-skip-permissions, stream-json stdin, and session map");
             fs::remove(exec_inv.temp_query_file, ec);
+
+            // Non-agy engines safely clamp xhigh/max down to high
+            auto hreq = ro_base;
+            hreq.engine_id = "hermes";
+            hreq.work_slot_model.reasoning_effort = "xhigh";
+            const auto hinv = prepare_cli_invocation(hreq, ro_harnesses);
+            check(has_pair(hinv.args, "--reasoning", "high"),
+                  "Hermes safely clamps xhigh reasoning effort to high");
+            fs::remove(hinv.temp_query_file, ec);
         }
     }
 
@@ -893,6 +916,38 @@ int main(int argc, char** argv) {
         // 8e. Shutdown of idle pool is safe & idempotent
         shutdown_cli_reception_pool();
         shutdown_cli_reception_pool();
+
+        // 8f. Antigravity `agy models` TSV parser & WSL mixed UTF-16LE/UTF-8 stderr sanitizer
+        {
+            const std::string tsv =
+                "Fetching available models...\n"
+                "gemini-4-neon-high\tGemini 4 Neon (High)\n"
+                "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n"
+                "gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n"
+                "claude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
+                "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
+            const auto parsed_models = parse_antigravity_models_output(tsv);
+            check(parsed_models.size() == 5U &&
+                      parsed_models[0] == "gemini-4-neon-high" &&
+                      parsed_models[1] == "gemini-4-neon-xhigh" &&
+                      parsed_models[2] == "gemini-pro-orchestrator-neon" &&
+                      parsed_models[3] == "claude-opus-5-5-high" &&
+                      parsed_models[4] == "gpt-oss-120b-medium",
+                  "parse_antigravity_models_output extracts exact TSV model slugs including gemini-4-neon-xhigh");
+
+            // Stray leading NUL left over after splitting a UTF-16LE wsl.exe line on '\n' must not garble UTF-8 stderr
+            std::string stray_nul_utf8;
+            stray_nul_utf8.push_back('\0');
+            stray_nul_utf8 += "Error: --print took \"--input-format\"";
+            check(sanitize_wsl_stderr_line(stray_nul_utf8) == "Error: --print took \"--input-format\"",
+                  "sanitize_wsl_stderr_line preserves UTF-8 stderr after stray leading NUL");
+
+            // Authentic UTF-16LE wsl.exe localhost proxy warning is cleanly stripped
+            const std::wstring wsl_warn = L"wsl: localhost proxy detected";
+            std::string utf16_bytes(reinterpret_cast<const char*>(wsl_warn.data()), wsl_warn.size() * sizeof(wchar_t));
+            check(sanitize_wsl_stderr_line(utf16_bytes).empty(),
+                  "sanitize_wsl_stderr_line drops authentic UTF-16LE wsl localhost proxy noise");
+        }
     }
 
     fs::remove_all(test_root, ec);

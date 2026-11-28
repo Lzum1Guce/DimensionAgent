@@ -1,3 +1,5 @@
+import { cliEngineDisplayName } from './cli-engine-catalog.js';
+
 /**
  * DimensionAgent 1v1 Pure Widescreen Immersive Mode (Galgame 2.5D Engine)
  * - Full-viewport widescreen without sidebar/topbar/margins
@@ -912,7 +914,7 @@ function syncPixelTheaterControls() {
   if (stageModeBtn) {
     stageModeBtn.textContent = pixelOn ? '立绘舞台' : '像素剧院';
     stageModeBtn.classList.toggle('is-pixel-on', pixelOn);
-    stageModeBtn.title = pixelOn ? '切换回 2.5D 高清立绘舞台' : '切换为欧式分层像素剧院舞台（支持 DeepSeek / Gemini 58 套精修循环动画）';
+    stageModeBtn.title = pixelOn ? '切换回 2.5D 高清立绘舞台' : '切换为欧式分层像素剧院舞台（全员 8 位 AI 娘 · 232 套精修循环像素动画）';
   }
   if (drawerStageModeBtn) {
     drawerStageModeBtn.textContent = pixelOn ? '切换为 2.5D 立绘舞台' : '切换为欧式像素剧院';
@@ -3371,18 +3373,7 @@ function renderModelPopover() {
     const cliRow = document.createElement('div');
     cliRow.className = `gal-model-cli-row${isCurCli ? ' is-active' : ''}`;
     const engId = String(cur?.engineId || String(cur?.providerId || '').replace(/^cli:/, '') || '').toLowerCase();
-    const engLabelMap = {
-      antigravity: 'Antigravity (agy)',
-      hermes: 'Hermes',
-      'kimi-code': 'Kimi Code',
-      'deepseek-harness': 'DeepSeek Harness',
-      'claude-code': 'Claude Code',
-      codex: 'Codex',
-      opencode: 'OpenCode',
-      'qwen-code': 'Qwen Code',
-      'gemini-cli': 'Gemini CLI',
-    };
-    const engName = engLabelMap[engId] || engId || '本机 CLI';
+    const engName = engId ? cliEngineDisplayName(engId) : '本机 CLI';
     const cliSummary = isCurCli
       ? `已启用 · ${engName}${cur?.model ? ` / ${String(cur.model).split('/').pop()}` : '（默认订阅）'}`
       : '点击设置选择本机可用 CLI 模型';

@@ -50,8 +50,9 @@ int main() {
           csv.find("10.0.0.1") != std::string::npos,
           "normalize_no_proxy_csv preserves custom hosts and enforces loopback safety");
     const std::string wh_bypass = to_winhttp_bypass_spec(csv);
-    check(wh_bypass.find("<local>") != std::string::npos && wh_bypass.find(';') != std::string::npos,
-          "to_winhttp_bypass_spec formats semicolon list with <local>");
+    check(wh_bypass.find("<local>") != std::string::npos && wh_bypass.find(';') != std::string::npos &&
+          wh_bypass.find("[::1]") != std::string::npos && wh_bypass.find(";::1;") == std::string::npos,
+          "to_winhttp_bypass_spec formats semicolon list with <local> and bracketed [::1] for WinHTTP");
     check(to_winhttp_proxy_spec("http://127.0.0.1:10808") == "127.0.0.1:10808",
           "to_winhttp_proxy_spec extracts host:port for HTTP proxy");
     check(to_winhttp_proxy_spec("socks5://127.0.0.1:10808").empty(),
@@ -97,6 +98,39 @@ int main() {
         check(r.mode == "none" && !r.use_proxy && !r.use_winhttp_auto &&
               r.active_proxy_url.empty() && r.sandbox_proxy_url.empty(),
               "None mode forces direct connection and clears all active proxies");
+    }
+    {
+        // 3b. Active local proxy auto-detection (e.g. TUN mode where Windows ProxyEnable=0)
+        SystemProxyInfo sys_local;
+        sys_local.enabled = true;
+        sys_local.source = "local-probe";
+        sys_local.proxy_url = "http://127.0.0.1:10808";
+        sys_local.http_proxy = sys_local.proxy_url;
+        sys_local.https_proxy = sys_local.proxy_url;
+        sys_local.detected_local_proxies = {"http://127.0.0.1:10808", "http://127.0.0.1:7897"};
+
+        NetworkProxySettings s_auto_local;
+        s_auto_local.mode = "auto";
+        const auto r_auto = resolve_network_proxy(s_auto_local, sys_local);
+        check(r_auto.use_proxy && !r_auto.use_winhttp_auto &&
+              r_auto.active_proxy_url == "http://127.0.0.1:10808" &&
+              r_auto.winhttp_proxy_spec == "127.0.0.1:10808",
+              "Auto mode adopts local-probe proxy via NAMED_PROXY when Windows system proxy is disabled");
+
+        NetworkProxySettings s_glob_auto;
+        s_glob_auto.mode = "global";
+        s_glob_auto.proxy_url = ""; // Empty URL -> auto-pick detected active local proxy
+        const auto r_glob = resolve_network_proxy(s_glob_auto, sys_local);
+        check(r_glob.use_proxy && !r_glob.use_winhttp_auto &&
+              r_glob.active_proxy_url == "http://127.0.0.1:10808" &&
+              r_glob.winhttp_proxy_spec == "127.0.0.1:10808",
+              "Global mode with blank URL automatically adopts detected active local proxy");
+
+        NetworkProxySettings s_none_local;
+        s_none_local.mode = "none";
+        const auto r_none = resolve_network_proxy(s_none_local, sys_local);
+        check(!r_none.use_proxy && r_none.active_proxy_url.empty(),
+              "None mode strictly ignores local-probe detected proxies");
     }
 
     // 4. Generation bumps on apply and host env overrides reflect none vs global cleanly

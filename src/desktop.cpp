@@ -762,6 +762,11 @@ Json DesktopManager::status(const std::string &bot, std::stop_token stop) {
     std::lock_guard guard(d->operation);
     return impl_->view(d);
 }
+Json DesktopManager::saved_settings(const std::string &bot) const {
+    std::lock_guard guard(impl_->mutex);
+    const auto* saved = impl_->state.at("bots").find(bot);
+    return saved ? *saved : Json(O{});
+}
 Json DesktopManager::settings(const std::string &bot) {
     auto d = impl_->get(bot);
     std::lock_guard guard(d->operation);
